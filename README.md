@@ -191,8 +191,9 @@ bar to seek · `?` for everything else.
 | `h` `j` `k` `l` | pan the graph |
 | `+` / `-` / `0` | zoom in / out / reset |
 | `c` | center on the selected agent |
-| click | open an agent's detail panel |
+| click | open an agent's detail panel: its conversation, and its tools as one line |
 | `j` / `k` / `PgUp` / `PgDn` | scroll the detail panel |
+| `x` | show the panel's long prompts whole |
 | `i` | session info overlay |
 | `enter` | run `--on-enter` for the selected agent's session |
 | `?` | help overlay |

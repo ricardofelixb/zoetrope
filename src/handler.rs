@@ -189,6 +189,12 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> bool {
             return false;
         }
 
+        // The panel's prompts, folded or whole.
+        KeyCode::Char('x') | KeyCode::Char('X') if app.selected_agent_id().is_some() => {
+            app.whole_prompts = !app.whole_prompts;
+            return false;
+        }
+
         _ => {}
     }
 

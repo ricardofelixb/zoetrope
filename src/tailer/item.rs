@@ -552,9 +552,7 @@ mod tests {
         let statements = bundle.append(&[("rollout-2026-08-26T15-33-46-c.jsonl", later)]);
         assert_eq!(statements.len(), 1);
         assert_eq!(statements[0].facts[0].agent.as_deref(), Some("c"));
-        assert!(
-            matches!(&statements[0].facts[0].kind, FactKind::Reasoning(t) if t == "child said")
-        );
+        assert!(matches!(&statements[0].facts[0].kind, FactKind::Message(t) if t == "child said"));
 
         // A file of another session is ignored on append.
         let stranger = r#"{"timestamp":"2026-08-26T16:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"z","session_id":"z","source":"cli","thread_source":"user"}}"#;

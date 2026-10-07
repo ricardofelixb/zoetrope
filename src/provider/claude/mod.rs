@@ -235,7 +235,7 @@ pub fn facts(source: &Source, entry: &Entry) -> Vec<Fact> {
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text } if !text.trim().is_empty() => {
-                            out.push(about(FactKind::Reasoning(text.clone())));
+                            out.push(about(FactKind::Message(text.clone())));
                         }
                         ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
                             out.push(about(FactKind::Reasoning(thinking.clone())));

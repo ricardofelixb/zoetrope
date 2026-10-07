@@ -13,6 +13,7 @@ pub(crate) mod chips;
 pub(crate) mod edges;
 pub(crate) mod nodes;
 pub(crate) mod panel;
+pub(crate) mod talk;
 
 use crate::fact::{FactKind, Outcome};
 use rataflow::{Background, MiniMap, MiniMapPosition};
@@ -612,7 +613,7 @@ fn render_help(frame: &mut Frame, area: Rect, palette: &rataflow::Palette) {
         ]),
         Line::from(vec![
             Span::styled(" panel     ", key),
-            Span::styled("j/k · pgup/pgdn scroll · esc close", txt),
+            Span::styled("j/k · pgup/pgdn scroll · x whole prompts · esc close", txt),
         ]),
         Line::from(vec![
             Span::styled(" timeline  ", key),
@@ -927,36 +928,9 @@ fn split_at_width(s: &str, cols: usize) -> usize {
     s.len()
 }
 
-/// Like [`truncate`] but keeps the END (e.g. a path's basename), eliding the
-/// front: `…/state/timeline.rs`. Column-measured, never panics on multibyte.
-pub(crate) fn truncate_tail(s: &str, max: usize) -> String {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-    if max == 0 {
-        return String::new();
-    }
-    if s.width() <= max {
-        return s.to_string();
-    }
-    if max == 1 {
-        return "…".to_string();
-    }
-    // Keep trailing chars totalling at most max-1 columns (one for the ellipsis).
-    let mut w = 0;
-    let mut start = s.len();
-    for (i, ch) in s.char_indices().rev() {
-        let cw = ch.width().unwrap_or(0);
-        if w + cw > max - 1 {
-            break;
-        }
-        w += cw;
-        start = i;
-    }
-    format!("…{}", &s[start..])
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{compute_scrubber_tally, truncate, truncate_tail, wrap};
+    use super::{compute_scrubber_tally, truncate, wrap};
     use crate::provider::claude::{Record, Source};
     use crate::tailer::ReplayItem;
 
@@ -980,14 +954,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_tail_keeps_the_basename() {
-        // Long path: keep the END (basename), elide the front.
-        assert_eq!(truncate_tail("src/state/timeline.rs", 12), "…timeline.rs");
-        // Fits → unchanged.
-        assert_eq!(truncate_tail("Cargo.toml", 20), "Cargo.toml");
-    }
-
-    #[test]
     fn wide_text_stays_within_column_budgets() {
         use unicode_width::UnicodeWidthStr;
         // CJK chars are 2 columns wide — char-counted budgets overflowed cards
@@ -995,8 +961,6 @@ mod tests {
         let s = "日本語テスト"; // 6 chars, 12 columns
         let out = truncate(s, 6);
         assert!(out.width() <= 6, "{out:?} is {} columns", out.width());
-        let tail = truncate_tail(s, 6);
-        assert!(tail.width() <= 6, "{tail:?} is {} columns", tail.width());
         // wrap: every produced line fits the column budget (hard-split words).
         for line in wrap("修复解析错误 and fix the parser", 6, usize::MAX) {
             assert!(line.width() <= 6, "{line:?} is {} columns", line.width());

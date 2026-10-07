@@ -124,7 +124,8 @@ src/
     ├── nodes.rs   # AgentNode: the agent-card NodeContent (semantic zoom: Card vs Cell)
     ├── edges.rs   # AgentEdge: parent→agent EdgeContent (animated while target Running)
     ├── chips.rs   # ephemeral tool-call chips — one reconcile pass, anchored to agent nodes (see ARCHITECTURE.md §5)
-    └── panel.rs   # detail panel for the selected agent
+    ├── panel.rs   # detail panel for the selected agent: header, conversation, one tool line
+    └── talk.rs    # an agent's conversation (prompts, what it was told, what it said) and its tools as one line
 ```
 
 ## Claude Code transcript format (verified against real data, Claude Code 2.1.153–2.1.165)

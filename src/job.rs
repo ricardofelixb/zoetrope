@@ -12,13 +12,16 @@
 //! {"zoe":"job","v":1,"id":"auth-fix","title":"Fix token refresh","task":"…","cwd":"/src/app","ts":"2026-10-06T09:00:00Z"}
 //! {"member":"plan","label":"plan: Opus (claude)","provider":"claude","session":"6f1c2a9e-…","ts":"…"}
 //! {"member":"review","label":"review: Sol (codex)","provider":"codex","path":"/home/me/.codex/sessions/…/rollout-….jsonl"}
+//! {"member":"review","told":"That finding is intended.","ts":"…"}
 //! ```
 //!
 //! The first line is the header (`"zoe":"job"`). Every other line names a
 //! member: its key, an optional label and task, and its session by `path` (any
 //! file of it; relative to the manifest's directory) or by `session` id, or
 //! both (the path wins). `provider` is optional but saves reading the file to
-//! find out, and is needed for a file that is still empty. Unknown keys and
+//! find out, and is needed for a file that is still empty. A `told` line is a
+//! message a person sent that member while it ran, which its session holds
+//! only inside the prompt the orchestrator wrapped it in. Unknown keys and
 //! unreadable lines are skipped.
 //!
 //! The manifest is the core's, not a provider's: it names sessions, and each
@@ -52,7 +55,7 @@ pub fn is_job_id(id: &str) -> bool {
 pub fn read_header(manifest: &Path) -> Option<Header> {
     match parse_line(&crate::provider::read_head(manifest)?)? {
         Line::Header(header) => Some(header),
-        Line::Member(_) => None,
+        Line::Member(_) | Line::Told(_) => None,
     }
 }
 
@@ -111,11 +114,21 @@ impl Entry {
     }
 }
 
+/// A message a person sent a member while it ran.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Told {
+    pub member: String,
+    pub told: String,
+    #[serde(default)]
+    pub ts: Option<DateTime<Utc>>,
+}
+
 /// One manifest line.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Line {
     Header(Header),
     Member(Entry),
+    Told(Told),
 }
 
 /// Parse one manifest line. `None` for a blank, unreadable or unknown line,
@@ -125,6 +138,10 @@ pub fn parse_line(line: &str) -> Option<Line> {
     if value.get("zoe").is_some() {
         let header: Header = serde_json::from_value(value).ok()?;
         return (header.zoe == MARKER).then_some(Line::Header(header));
+    }
+    if value.get("told").is_some() {
+        let told: Told = serde_json::from_value(value).ok()?;
+        return valid_key(&told.member).then_some(Line::Told(told));
     }
     let entry: Entry = serde_json::from_value(value).ok()?;
     let usable = valid_key(&entry.member) && (entry.path.is_some() || entry.session.is_some());
@@ -381,7 +398,9 @@ impl Member {
                 | FactKind::Model(_)
                 | FactKind::Tokens { .. }
                 | FactKind::Prompt(_)
+                | FactKind::Message(_)
                 | FactKind::Reasoning(_)
+                | FactKind::Told(_)
                 | FactKind::Ended(_)
                 | FactKind::Tally(_)) => kind,
             };

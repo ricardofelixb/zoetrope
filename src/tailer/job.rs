@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::sync::mpsc;
 
-use crate::fact::Statement;
+use crate::fact::{Fact, FactKind, Statement};
 use crate::job::{self, Entry, Line, Member};
 use crate::provider::{Provider, Target, open};
 
@@ -73,6 +73,15 @@ impl JobFeed {
                         }
                         Line::Header(_) => {}
                         Line::Member(entry) => self.pending.push(entry),
+                        // To the member's latest session under that key.
+                        Line::Told(told) => out.push(
+                            Fact {
+                                agent: Some(root(&told.member, self.count(&told.member).max(1))),
+                                ts: told.ts,
+                                kind: FactKind::Told(told.told),
+                            }
+                            .into(),
+                        ),
                     }
                 }
             }
@@ -119,15 +128,16 @@ impl JobFeed {
         }
         let count = self.per_key.entry(entry.member.clone()).or_default();
         *count += 1;
-        let root = match *count {
-            1 => entry.member.clone(),
-            n => format!("{}~{n}", entry.member),
-        };
-        let member = Member::new(root, entry);
+        let member = Member::new(root(&entry.member, *count), entry);
         out.push(member.birth());
         out.push(member.session(session.provider, &session.id));
         self.members
             .push((member, LiveSession::new(session, None, entry.provider)));
+    }
+
+    /// How many sessions have joined under `key`.
+    fn count(&self, key: &str) -> usize {
+        self.per_key.get(key).copied().unwrap_or(0)
     }
 
     /// One poll tick: emit what was read as one batch, or re-attach.
@@ -154,6 +164,14 @@ impl JobFeed {
                 .await;
         }
         None
+    }
+}
+
+/// The node of the `n`th session to join under `key`: the key, then `key~2`.
+fn root(key: &str, n: usize) -> String {
+    match n {
+        1 => key.to_string(),
+        n => format!("{key}~{n}"),
     }
 }
 
@@ -361,6 +379,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_told_line_goes_to_the_members_latest_session() {
+        let dir = temp_dir("told");
+        let manifest = dir.join("told.jsonl");
+        let plan = dir.join("11111111-1111-1111-1111-111111111111.jsonl");
+        append(&plan, &claude_line("plan this", 0));
+        append(&manifest, r#"{"zoe":"job","v":1,"id":"j"}"#);
+        append(
+            &manifest,
+            r#"{"member":"plan","path":"11111111-1111-1111-1111-111111111111.jsonl"}"#,
+        );
+        append(
+            &manifest,
+            r#"{"member":"plan","told":"use the helper","ts":"2026-10-06T10:05:00Z"}"#,
+        );
+        append(&manifest, r#"{"member":"no/such","told":"dropped"}"#);
+        let mut out = Vec::new();
+        assert!(!JobFeed::new(manifest).read(&mut out));
+        let told: Vec<_> = out
+            .iter()
+            .flat_map(|s| &s.facts)
+            .filter_map(|f| match &f.kind {
+                FactKind::Told(t) => Some((f.agent.as_deref(), t.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told, [(Some("plan"), "use the helper")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The fixture job mixes a Claude session (with subagents and a workflow)
     /// and a Codex session (with child threads) in one tree.
     #[test]
@@ -417,6 +465,7 @@ mod tests {
                     continue;
                 }
                 Line::Member(entry) => entry,
+                Line::Told(_) => continue,
             };
             let path = entry.path_from(manifest).unwrap();
             let session = open(&Target::Path(path), entry.provider).unwrap();

@@ -7,7 +7,7 @@
 //! Codex's thread id, a group's own id). Spawn order is tracked explicitly so
 //! layout and navigation are deterministic.
 
-use imbl::{HashMap, HashSet, OrdMap, Vector};
+use imbl::{HashMap, HashSet, OrdMap, OrdSet, Vector};
 
 use chrono::{DateTime, Utc};
 
@@ -63,6 +63,9 @@ pub struct SessionModel {
     /// session's spine. Tool calls and spawns attribute to a prompt era via
     /// [`Self::prompt_for_ts`] (timestamp-derived, order-independent).
     pub(crate) prompts: Vector<PromptInfo>,
+    /// The conversation, every agent's, in time order. A set, so a re-applied
+    /// fact is no second entry and the order never depends on arrival.
+    feed: OrdSet<Entry>,
     /// Excerpt of each agent's most recent reasoning. One logical turn spans
     /// several records, so the reasoning for a spawn usually lives on an
     /// EARLIER record than the call — this is the cross-record fallback for
@@ -99,6 +102,27 @@ pub struct Said {
     pub excerpt: String,
     /// When the message was recorded.
     pub ts: Option<DateTime<Utc>>,
+}
+
+/// One entry of the session's conversation, which [`SessionModel::feed`] keeps
+/// in time order: what an agent was asked, what a person told it while it ran,
+/// or what it said. Whole, not excerpted: the feed is for reading.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Entry {
+    pub ts: Option<DateTime<Utc>>,
+    pub agent: String,
+    pub kind: EntryKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EntryKind {
+    /// A prompt on the agent's thread.
+    Prompt,
+    /// A person's message, sent while the agent ran.
+    Told,
+    /// The agent's own words.
+    Message,
 }
 
 /// One user prompt in the main transcript — an era boundary on the session's
@@ -324,6 +348,7 @@ impl SessionModel {
             ended: HashMap::new(),
             spawn_context: HashMap::new(),
             prompts: Vector::new(),
+            feed: OrdSet::new(),
             last_reasoning: HashMap::new(),
         }
     }
@@ -408,7 +433,10 @@ impl SessionModel {
             }
             return created || moved;
         }
-        let by_agent = !matches!(fact.kind, FactKind::Label { .. } | FactKind::Ended(_));
+        let by_agent = !matches!(
+            fact.kind,
+            FactKind::Label { .. } | FactKind::Ended(_) | FactKind::Told(_)
+        );
         if by_agent {
             match &fact.kind {
                 FactKind::Agent { kind, parent, .. } => {
@@ -460,6 +488,20 @@ impl SessionModel {
     /// changed.
     fn fold_kind(&mut self, id: &str, fact: &Fact) -> bool {
         let mut structural = false;
+        let entry = match &fact.kind {
+            FactKind::Prompt(text) => Some((EntryKind::Prompt, text)),
+            FactKind::Told(text) => Some((EntryKind::Told, text)),
+            FactKind::Message(text) => Some((EntryKind::Message, text)),
+            _ => None,
+        };
+        if let Some((kind, text)) = entry {
+            self.feed.insert(Entry {
+                ts: fact.ts,
+                agent: id.to_string(),
+                kind,
+                text: text.clone(),
+            });
+        }
         match &fact.kind {
             FactKind::Activity
             | FactKind::Session { .. }
@@ -548,8 +590,8 @@ impl SessionModel {
                     self.prompts.insert(at, PromptInfo { excerpt: ex, ts });
                 }
             }
-            FactKind::Prompt(_) => {}
-            FactKind::Reasoning(text) => {
+            FactKind::Prompt(_) | FactKind::Told(_) => {}
+            FactKind::Message(text) | FactKind::Reasoning(text) => {
                 let said = Said {
                     excerpt: excerpt(text),
                     ts: fact.ts,
@@ -896,6 +938,11 @@ impl SessionModel {
     }
 
     /// Borrow an agent by node id.
+    /// The conversation in time order: see [`Entry`].
+    pub fn feed(&self) -> impl ExactSizeIterator<Item = &Entry> {
+        self.feed.iter()
+    }
+
     pub fn agent(&self, id: &str) -> Option<&AgentInfo> {
         self.agents.get(id)
     }

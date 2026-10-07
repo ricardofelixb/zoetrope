@@ -201,10 +201,6 @@ pub struct App {
     /// the item count or bar width changes — not every frame. See
     /// [`crate::ui::ScrubberTally`].
     pub(crate) scrubber_tally: Option<crate::ui::ScrubberTally>,
-    /// Cached era-header flags for the detail panel's tool list — the
-    /// O(calls × prompts) attribution, recomputed only when the selected
-    /// agent / its calls / the prompts change. See [`crate::ui::panel::EraCache`].
-    pub(crate) era_cache: Option<crate::ui::panel::EraCache>,
     /// When the last genuine append (tail `Batch`) folded — drives the emergent
     /// "live" state ([`transport`](Self::transport)). `None` until one arrives.
     pub last_batch_at: Option<web_time::Instant>,
@@ -227,6 +223,8 @@ pub struct App {
     /// Ladder of folded-model snapshots, ascending by `folded`, used to start a
     /// backward seek near its target instead of re-folding from item zero.
     snapshots: Vec<Snapshot>,
+    /// Whether the detail panel shows long prompts whole (`x`).
+    pub whole_prompts: bool,
     /// The command `enter` runs for the selected agent's session (`--on-enter`):
     /// words split on whitespace, `{provider}`, `{session}` and `{cwd}` filled in
     /// from [`session_of`](Self::session_of). `None`: `enter` does nothing.
@@ -264,13 +262,13 @@ impl App {
             timeline: Timeline::new(),
             scrubber_area: None,
             scrubber_tally: None,
-            era_cache: None,
             last_batch_at: None,
             session_info: SessionInfo::default(),
             show_info: false,
             pending_center: None,
             pending_seek: None,
             snapshots: Vec::new(),
+            whole_prompts: false,
             on_enter: None,
         }
     }
