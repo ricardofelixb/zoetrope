@@ -20,6 +20,16 @@ use crate::state::{App, Camera};
 /// `app` only — every key path is in-process state (no channel).
 pub fn handle_event(event: &Event, app: &mut App) -> bool {
     match event {
+        Event::Key(key) if app.draft.is_some() => {
+            write_key(key, app);
+            false
+        }
+        Event::Paste(text) => {
+            if let Some(draft) = app.draft.as_mut() {
+                draft.insert(text);
+            }
+            false
+        }
         Event::Key(key) => handle_key(key, app),
         Event::Mouse(mouse) => {
             // A press/drag on the scrubber row seeks the playhead — intercept it
@@ -41,10 +51,44 @@ pub fn handle_event(event: &Event, app: &mut App) -> bool {
                 app.pending_seek = Some(rel as f64 / (bar.width - 1) as f64);
                 return false;
             }
+            // The panel's left edge, held, resizes it.
+            let held = match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => app.grab_panel(mouse.column, mouse.row),
+                MouseEventKind::Drag(MouseButton::Left) => app.drag_panel(mouse.column),
+                MouseEventKind::Up(MouseButton::Left) => std::mem::take(&mut app.panel_drag),
+                _ => false,
+            };
+            if held {
+                return false;
+            }
+            // The wheel over the panel scrolls its conversation.
+            let wheel = match mouse.kind {
+                MouseEventKind::ScrollUp => -WHEEL_SCROLL,
+                MouseEventKind::ScrollDown => WHEEL_SCROLL,
+                _ => 0,
+            };
+            if wheel != 0 && app.wheel_panel(mouse.column, mouse.row, wheel) {
+                return false;
+            }
             // rataflow re-exports ratatui's crossterm; types unify, so the
             // `From<crossterm::event::MouseEvent>` impl applies directly.
-            let response = app.flow.handle_mouse_event(*mouse);
-            process_flow_events(app, response.into_events());
+            let events: Vec<_> = app.flow.handle_mouse_event(*mouse).into_events().collect();
+            // A click on the root's card runs `--on-root` instead of selecting it.
+            let root = events.iter().any(|e| {
+                matches!(e, rataflow::FlowEvent::SelectionChanged { node_ids, .. }
+                    if node_ids.iter().any(|id| id == crate::state::session::MAIN_ID))
+            });
+            match app.on_root.clone() {
+                Some(command) if root => {
+                    app.flow.clear_selection();
+                    spawn(
+                        app,
+                        "--on-root",
+                        command.split_whitespace().map(str::to_string),
+                    );
+                }
+                _ => process_flow_events(app, events.into_iter()),
+            }
             false
         }
         _ => false,
@@ -104,7 +148,7 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> bool {
             app.camera = Camera::Overview;
             app.camera_glide = None; // fit-view owns the viewport now
             // Camera is orthogonal to layout: frame what's there, never reflow.
-            app.flow.request_fit_view();
+            crate::state::fit(&mut app.flow);
             return false;
         }
         KeyCode::Char('f') | KeyCode::Char('F') => {
@@ -184,14 +228,25 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> bool {
             return false;
         }
 
-        KeyCode::Enter => {
-            open_selected(app);
+        // Write to the panel's agent, when it has a session to send to.
+        KeyCode::Enter if app.on_send.is_some() => {
+            if let Some(about) = app.panel_agent().filter(|id| app.session_of(id).is_some()) {
+                app.draft = Some(crate::state::Draft {
+                    about,
+                    ..Default::default()
+                });
+            }
             return false;
         }
 
         // The panel's prompts, folded or whole.
-        KeyCode::Char('x') | KeyCode::Char('X') if app.selected_agent_id().is_some() => {
+        KeyCode::Char('x') | KeyCode::Char('X') if app.panel_agent().is_some() => {
             app.whole_prompts = !app.whole_prompts;
+            return false;
+        }
+
+        KeyCode::Char('t') | KeyCode::Char('T') => {
+            app.show_timeline = !app.show_timeline;
             return false;
         }
 
@@ -227,22 +282,69 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> bool {
     false
 }
 
-/// Run the `--on-enter` command for the selected agent's session, if the card
-/// is one, without waiting for it: what it opens (a resumed chat, most likely)
-/// is the command's business, and zoe stays read-only.
-fn open_selected(app: &mut App) {
-    let Some(command) = app.on_enter.clone() else {
+/// A key while a message is being written: it edits the draft, `enter` sends
+/// it and `esc` drops it. No other key acts meanwhile, so typing a letter never
+/// fires its shortcut.
+fn write_key(key: &KeyEvent, app: &mut App) {
+    if matches!(key.kind, KeyEventKind::Release) {
+        return;
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let Some(draft) = app.draft.as_mut() else {
         return;
     };
-    let Some(session) = app.selected_agent_id().and_then(|id| app.session_of(&id)) else {
+    match key.code {
+        KeyCode::Esc => app.draft = None,
+        KeyCode::Char('c') if ctrl => app.draft = None,
+        KeyCode::Char('u') if ctrl => {
+            *draft = crate::state::Draft {
+                about: std::mem::take(&mut draft.about),
+                ..Default::default()
+            }
+        }
+        KeyCode::Enter => send(app),
+        KeyCode::Char(c) => draft.insert(c.encode_utf8(&mut [0; 4])),
+        KeyCode::Backspace => draft.backspace(),
+        KeyCode::Delete => draft.delete(),
+        KeyCode::Left => draft.step(-1),
+        KeyCode::Right => draft.step(1),
+        KeyCode::Home => draft.home(),
+        KeyCode::End => draft.end(),
+        _ => {}
+    }
+}
+
+/// Send the draft with the `--on-send` command, without waiting for it: where
+/// it goes is the command's business, and zoe stays read-only. An empty draft
+/// is dropped.
+fn send(app: &mut App) {
+    let Some(draft) = app.draft.take() else {
         return;
     };
-    let cwd = session.cwd.unwrap_or_default();
-    let mut words = command.split_whitespace().map(|word| {
-        word.replace("{provider}", session.provider.name())
-            .replace("{session}", &session.id)
+    let (Some(command), false) = (app.on_send.clone(), draft.text.trim().is_empty()) else {
+        return;
+    };
+    let Some(session) = app.session_of(&draft.about) else {
+        return;
+    };
+    let (provider, id, cwd) = (
+        session.provider.name().to_string(),
+        session.id,
+        session.cwd.unwrap_or_default(),
+    );
+    let text = draft.text.trim();
+    let words = command.split_whitespace().map(|word| {
+        word.replace("{provider}", &provider)
+            .replace("{session}", &id)
             .replace("{cwd}", &cwd)
+            .replace("{text}", text)
     });
+    spawn(app, "--on-send", words);
+}
+
+/// Run a command (its program, then its arguments) without waiting for it;
+/// a failure to start shows as `flag`'s error.
+fn spawn(app: &mut App, flag: &str, mut words: impl Iterator<Item = String>) {
     let Some(program) = words.next() else {
         return;
     };
@@ -255,9 +357,12 @@ fn open_selected(app: &mut App) {
     match spawned {
         // Reaped off the input path, so it never lingers as a zombie.
         Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
-        Err(e) => app.last_error = Some(format!("--on-enter: {e}")),
+        Err(e) => app.last_error = Some(format!("{flag}: {e}")),
     }
 }
+
+/// Rows moved per wheel notch over the detail panel.
+const WHEEL_SCROLL: i32 = 3;
 
 /// Rows moved per PageUp/PageDown in the detail panel's tool-call list.
 const PAGE_SCROLL: i32 = 10;
@@ -267,7 +372,7 @@ const PAGE_SCROLL: i32 = 10;
 /// (so the key is consumed and not forwarded to the flow); `false` lets the key
 /// fall through to graph navigation when no panel is shown.
 fn scroll_detail(app: &mut App, delta: i32) -> bool {
-    if app.selected_agent_id().is_none() {
+    if app.panel_agent().is_none() {
         return false;
     }
     // Scrolling up detaches the tail; scrolling down to the bottom re-attaches.
@@ -643,5 +748,108 @@ mod tests {
             app.layout_dirty,
             "camera keys are orthogonal to layout: o must NOT relayout (only r does)"
         );
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        handle_event(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)), app);
+    }
+
+    /// `enter` writes, every key then edits the message, not the graph, and
+    /// `esc` drops it; nothing is written without `--on-send`.
+    #[test]
+    fn enter_writes_a_message_and_keys_edit_it() {
+        let mut app = App::new("s".into(), Mode::Live);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.draft.is_none(), "no --on-send, no message");
+        app.on_send = Some("say {text}".into());
+        press(&mut app, KeyCode::Enter);
+        assert!(app.draft.is_none(), "no agent, no message");
+        app.draft = Some(crate::state::Draft::default());
+        for c in "hqi".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(!app.should_quit, "q is a letter while writing");
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Backspace);
+        handle_event(&Event::Paste("ey\nyou".into()), &mut app);
+        let draft = app.draft.clone().unwrap();
+        assert_eq!((draft.text.as_str(), draft.cursor), ("hey youi", 7));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.draft.is_none());
+    }
+
+    #[test]
+    fn the_wheel_over_the_panel_scrolls_it() {
+        let mut app = App::new("s".into(), Mode::Live);
+        assert!(!app.wheel_panel(5, 5, 3), "no panel");
+        app.panel_area = Some(ratatui::layout::Rect::new(10, 0, 20, 10));
+        assert!(!app.wheel_panel(5, 5, 3), "outside it");
+        assert!(app.wheel_panel(12, 5, -3));
+        assert!(!app.detail_follow, "up stops following");
+    }
+
+    #[test]
+    fn dragging_the_panel_edge_resizes_it() {
+        let mut app = App::new("s".into(), Mode::Live);
+        app.panel_area = Some(ratatui::layout::Rect::new(30, 0, 70, 10));
+        handle_event(
+            &mouse(MouseEventKind::Down(MouseButton::Left), 30, 5),
+            &mut app,
+        );
+        assert!(app.panel_drag, "the edge is held");
+        handle_event(
+            &mouse(MouseEventKind::Drag(MouseButton::Left), 50, 5),
+            &mut app,
+        );
+        assert_eq!(app.panel_share, 50);
+        handle_event(
+            &mouse(MouseEventKind::Drag(MouseButton::Left), 99, 5),
+            &mut app,
+        );
+        assert_eq!(app.panel_share, 20, "never thinner than a fifth");
+        handle_event(
+            &mouse(MouseEventKind::Up(MouseButton::Left), 99, 5),
+            &mut app,
+        );
+        assert!(!app.panel_drag);
+        handle_event(
+            &mouse(MouseEventKind::Down(MouseButton::Left), 60, 5),
+            &mut app,
+        );
+        assert!(!app.panel_drag, "inside the panel is not the edge");
+    }
+
+    /// Watching only the agents, the root's card opens no panel: its keys
+    /// are the graph's, and there is nothing to write to.
+    #[test]
+    fn agents_only_leaves_the_root_without_a_panel() {
+        let mut app = App::new("s".into(), Mode::Live);
+        app.agents_only = true;
+        app.on_send = Some("say {text}".into());
+        let node = rataflow::Node::new(
+            crate::state::session::MAIN_ID,
+            (0.0, 0.0),
+            (10.0, 5.0),
+            crate::ui::nodes::AgentNode {
+                title: "root".into(),
+                description: None,
+                said: None,
+                status: crate::state::session::AgentStatus::Running,
+                tool_count: 0,
+                last_tool: None,
+                output_tokens: 0,
+                interactive: false,
+            },
+        );
+        app.flow.add_node(node).unwrap();
+        app.flow.select_node(crate::state::session::MAIN_ID);
+        assert!(app.selected_agent_id().is_some());
+        assert!(app.panel_agent().is_none());
+        press(&mut app, KeyCode::Enter);
+        assert!(app.draft.is_none());
+        app.agents_only = false;
+        assert!(app.panel_agent().is_some(), "otherwise the root has one");
+        press(&mut app, KeyCode::Char('t'));
+        assert!(!app.show_timeline, "t hides the timeline");
     }
 }

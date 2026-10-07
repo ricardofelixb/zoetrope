@@ -1,6 +1,7 @@
 //! Detail panel for the selected agent.
 //!
-//! When an agent node is selected, the main area splits 30/70 and this panel
+//! When an agent node is selected, the main area splits (in half until its left
+//! edge is dragged, [`App::panel_share`]) and this panel
 //! shows the agent: a short header (name, status, model, timing, what it was
 //! for), then its conversation, scrollable, which follows the newest line until
 //! scrolled up (see [`crate::ui::talk`]), and all its tool calls as one line at
@@ -11,6 +12,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
+
+use chrono::{DateTime, Utc};
 
 use crate::state::App;
 use crate::state::session::AgentInfo;
@@ -27,14 +30,24 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
         session,
         detail_scroll,
         detail_follow,
+        detail_seen,
         whole_prompts,
+        panel_drag,
+        timeline,
         ..
     } = app;
+    let now = timeline.now_reference();
     let bg = Style::default().bg(palette.surface);
+    // The left edge is a handle: drag it to resize; it lights up while held.
+    let edge = if *panel_drag {
+        palette.accent
+    } else {
+        palette.muted
+    };
 
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.muted).bg(palette.surface))
+        .border_style(Style::default().fg(edge).bg(palette.surface))
         .style(bg)
         .padding(Padding::horizontal(1))
         // Affordance: the way out is visible, not tribal knowledge.
@@ -57,7 +70,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
         return;
     };
 
-    let tools = talk::tools(session, agent_id, inner.width as usize, &palette);
+    let tools = talk::tools(session, agent_id, inner.width as usize, now, &palette);
     let [header_area, talk_area, tools_area] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Fill(1),
@@ -84,11 +97,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     let (scroll, follow) = resolve_scroll(total, talk_inner.height, *detail_scroll, *detail_follow);
     *detail_scroll = scroll;
     *detail_follow = follow;
+    // Scrolled up, what has been said since is counted, as a chat would.
+    let said = talk::said(session, agent_id);
+    let seen = *detail_seen.get_or_insert(said);
+    if follow {
+        *detail_seen = None;
+    }
     if total > talk_inner.height {
-        let label = if follow {
-            " j/k ↕ tail ".to_string()
-        } else {
-            format!(" j/k ↕ {scroll}/{total} ")
+        let label = match said.saturating_sub(seen) {
+            _ if follow => " ↕ wheel · j/k ".to_string(),
+            0 => format!(" ↕ {scroll}/{total} "),
+            new => format!(" ↓ {new} new "),
         };
         block = block.title_bottom(
             Line::from(label)
@@ -101,7 +120,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
         return;
     }
 
-    render_header(frame, header_area, agent, &palette);
+    render_header(frame, header_area, agent, now, &palette);
     frame.render_widget(talk_block, talk_area);
     let shown: Vec<Line> = if lines.is_empty() {
         vec![Line::styled("nothing said yet", bg.fg(palette.subtle))]
@@ -118,7 +137,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     }
 }
 
-fn render_header(frame: &mut Frame, area: Rect, agent: &AgentInfo, palette: &rataflow::Palette) {
+fn render_header(
+    frame: &mut Frame,
+    area: Rect,
+    agent: &AgentInfo,
+    now: Option<DateTime<Utc>>,
+    palette: &rataflow::Palette,
+) {
     let bg = Style::default().bg(palette.surface);
     let width = area.width as usize;
 
@@ -138,7 +163,7 @@ fn render_header(frame: &mut Frame, area: Rect, agent: &AgentInfo, palette: &rat
         agent.status_word(),
         bg.fg(crate::ui::status_color(agent.status, palette)),
     )];
-    for part in [agent.model.clone(), fmt_timing(agent)]
+    for part in [agent.model.clone(), fmt_timing(agent, now)]
         .into_iter()
         .flatten()
     {
@@ -168,9 +193,16 @@ fn resolve_scroll(total: u16, height: u16, scroll: u16, follow: bool) -> (u16, b
     (offset, offset >= max)
 }
 
-/// Format a timing line from an agent's first/last timestamps.
-fn fmt_timing(agent: &AgentInfo) -> Option<String> {
-    match (agent.first_ts, agent.last_ts) {
+/// Format a timing line from an agent's first/last timestamps; a running
+/// agent's counts up to `now` (the timeline's `now_reference`).
+fn fmt_timing(agent: &AgentInfo, now: Option<DateTime<Utc>>) -> Option<String> {
+    let running = agent.status == crate::state::session::AgentStatus::Running;
+    let last = if running {
+        now.or(agent.last_ts)
+    } else {
+        agent.last_ts
+    };
+    match (agent.first_ts, last) {
         (Some(first), Some(last)) => {
             let secs = (last - first).num_seconds().max(0);
             if secs >= 60 {
@@ -203,7 +235,7 @@ mod tests {
         assert_eq!(resolve_scroll(20, 8, 99, false), (12, true));
     }
 
-    use chrono::{TimeZone, Utc};
+    use chrono::TimeZone;
 
     fn agent_with_ts(first: Option<i64>, last: Option<i64>) -> AgentInfo {
         let mut a = AgentInfo::new(crate::state::session::AgentKind::Subagent);
@@ -215,24 +247,37 @@ mod tests {
     #[test]
     fn timing_duration_under_a_minute() {
         let a = agent_with_ts(Some(100), Some(142));
-        assert_eq!(fmt_timing(&a).as_deref(), Some("⏱ 42s"));
+        assert_eq!(fmt_timing(&a, None).as_deref(), Some("⏱ 42s"));
     }
 
     #[test]
     fn timing_duration_over_a_minute() {
         let a = agent_with_ts(Some(0), Some(125));
-        assert_eq!(fmt_timing(&a).as_deref(), Some("⏱ 2m 5s"));
+        assert_eq!(fmt_timing(&a, None).as_deref(), Some("⏱ 2m 5s"));
     }
 
     #[test]
     fn timing_negative_clamped() {
         let a = agent_with_ts(Some(100), Some(50));
-        assert_eq!(fmt_timing(&a).as_deref(), Some("⏱ 0s"));
+        assert_eq!(fmt_timing(&a, None).as_deref(), Some("⏱ 0s"));
+    }
+
+    #[test]
+    fn timing_counts_up_while_running() {
+        let mut a = agent_with_ts(Some(0), Some(10));
+        let now = Utc.timestamp_opt(70, 0).single();
+        assert_eq!(fmt_timing(&a, now).as_deref(), Some("⏱ 1m 10s"));
+        a.status = crate::state::session::AgentStatus::Done;
+        assert_eq!(
+            fmt_timing(&a, now).as_deref(),
+            Some("⏱ 10s"),
+            "a finished agent stops"
+        );
     }
 
     #[test]
     fn timing_none_when_no_first() {
         let a = agent_with_ts(None, None);
-        assert!(fmt_timing(&a).is_none());
+        assert!(fmt_timing(&a, None).is_none());
     }
 }

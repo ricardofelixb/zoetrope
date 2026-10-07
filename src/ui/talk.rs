@@ -16,8 +16,8 @@ use crate::ui::{truncate, wrap};
 
 /// Wrapped lines of a prompt shown before it folds; `x` shows prompts whole.
 const PROMPT_LINES: usize = 3;
-/// The time column, `HH:MM:SS` and two spaces, which bodies are indented past.
-const TIME_COLS: usize = 10;
+/// The time column, `HH:MM` and two spaces, which bodies are indented past.
+const TIME_COLS: usize = 7;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// What the panel calls an agent: the name its session or its spawner gave it.
@@ -63,43 +63,62 @@ pub(crate) fn lines(
     let job = crate::job::is_job_id(&model.session_id);
     let base = depth(model, scope) + usize::from(job && scope == MAIN_ID);
     let subtle = Style::default().fg(palette.subtle);
+    let code = Style::default().fg(palette.accent);
     let mut out = Vec::new();
+    // The minute shown last: a time is shown only when it changes.
+    let mut minute = String::new();
     for item in items(model, scope) {
         let id = item.agent();
         let depth = depth(model, id).saturating_sub(base);
         let indent = TIME_COLS + 2 * depth;
         let text_w = width.saturating_sub(indent + 1).max(8);
-        let time = item.ts().map_or_else(
-            || " ".repeat(TIME_COLS),
-            |t| format!("{}  ", t.with_timezone(&chrono::Local).format("%H:%M:%S")),
-        );
+        let time = match item.ts() {
+            Some(t) => {
+                let at = t.with_timezone(&chrono::Local).format("%H:%M").to_string();
+                let shown = if at == minute {
+                    " ".repeat(5)
+                } else {
+                    at.clone()
+                };
+                minute = at;
+                format!("{shown}  ")
+            }
+            None => " ".repeat(TIME_COLS),
+        };
         let who = name(model, id);
+        // The panel's own agent goes unnamed: its header says who it is. A
+        // message of its own is just its time and its words.
+        let own = id == scope;
+        let to = |from: &str| {
+            if own {
+                from.to_string()
+            } else {
+                format!("{from} → {who}")
+            }
+        };
+        let accent = Style::default().fg(palette.accent);
         let (header, head_style, body, body_style, fold) = match item {
             Item::Entry(e) => match e.kind {
-                EntryKind::Prompt if job && id == MAIN_ID => {
-                    ("task".to_string(), subtle, e.text.as_str(), subtle, true)
-                }
+                EntryKind::Prompt if job && id == MAIN_ID => (
+                    Some("task".to_string()),
+                    subtle,
+                    e.text.as_str(),
+                    subtle,
+                    true,
+                ),
                 EntryKind::Prompt => {
-                    let from = if job { "conductor" } else { "you" };
-                    (
-                        format!("{from} → {who}"),
-                        subtle,
-                        e.text.as_str(),
-                        subtle,
-                        true,
-                    )
+                    let from = to(if job { "conductor" } else { "you" });
+                    (Some(from), subtle, e.text.as_str(), subtle, true)
                 }
                 EntryKind::Told => (
-                    format!("you → {who}"),
-                    Style::default()
-                        .fg(palette.accent)
-                        .add_modifier(Modifier::BOLD),
+                    Some(to("you")),
+                    accent.add_modifier(Modifier::BOLD),
                     e.text.as_str(),
-                    Style::default().fg(palette.accent),
+                    accent,
                     false,
                 ),
                 EntryKind::Message => (
-                    who,
+                    (!own).then(|| who.clone()),
                     Style::default()
                         .fg(palette.text)
                         .add_modifier(Modifier::BOLD),
@@ -116,27 +135,42 @@ pub(crate) fn lines(
                     }
                     _ => format!("{who} started"),
                 };
-                (head, subtle, "", subtle, false)
+                (Some(head), subtle, "", subtle, false)
             }
         };
         if !out.is_empty() {
             out.push(Line::default());
         }
-        out.push(Line::from(vec![
-            Span::styled(time, subtle),
-            Span::raw(" ".repeat(2 * depth)),
-            Span::styled(truncate(&header, width.saturating_sub(indent)), head_style),
-        ]));
+        let pad = " ".repeat(2 * depth);
+        let mut time = Some(time);
+        if let Some(header) = header {
+            out.push(Line::from(vec![
+                Span::styled(time.take().unwrap_or_default(), subtle),
+                Span::raw(pad.clone()),
+                Span::styled(truncate(&header, width.saturating_sub(indent)), head_style),
+            ]));
+        }
 
-        let mut wrapped: Vec<String> = Vec::new();
+        // Each line, and whether it is in a code block: those keep their
+        // indentation and lose their fences.
+        let mut wrapped: Vec<(String, bool)> = Vec::new();
+        let mut fenced = false;
         for para in plain(body).lines() {
-            if para.trim().is_empty() {
-                wrapped.push(String::new());
+            if para.trim_start().starts_with("```") {
+                fenced = !fenced;
+            } else if fenced {
+                wrapped.push((truncate(para, text_w), true));
+            } else if para.trim().is_empty() {
+                wrapped.push((String::new(), false));
             } else {
-                wrapped.extend(wrap(para, text_w, usize::MAX));
+                wrapped.extend(
+                    wrap(para, text_w, usize::MAX)
+                        .into_iter()
+                        .map(|l| (l, false)),
+                );
             }
         }
-        while wrapped.last().is_some_and(String::is_empty) {
+        while wrapped.last().is_some_and(|(l, _)| l.is_empty()) {
             wrapped.pop();
         }
         let hidden = if fold && !whole {
@@ -145,15 +179,23 @@ pub(crate) fn lines(
             0
         };
         wrapped.truncate(wrapped.len() - hidden);
-        while hidden > 0 && wrapped.last().is_some_and(String::is_empty) {
+        while hidden > 0 && wrapped.last().is_some_and(|(l, _)| l.is_empty()) {
             wrapped.pop();
         }
         let margin = " ".repeat(indent);
-        for text in wrapped {
-            out.push(Line::from(vec![
-                Span::raw(margin.clone()),
-                Span::styled(text, body_style),
-            ]));
+        for (text, fenced) in wrapped {
+            // Unheaded, the first line carries the time.
+            let lead = match time.take() {
+                Some(time) => Span::styled(format!("{time}{pad}"), subtle),
+                None => Span::raw(margin.clone()),
+            };
+            let mut line = vec![lead];
+            if fenced {
+                line.push(Span::styled(text, code));
+            } else {
+                line.extend(inline_code(&text, body_style, code));
+            }
+            out.push(Line::from(line));
         }
         if hidden > 0 {
             out.push(Line::from(vec![
@@ -163,6 +205,24 @@ pub(crate) fn lines(
         }
     }
     out
+}
+
+/// A line's spans, its `inline code` in `code` without the backticks; a line
+/// with an unpaired backtick reads as it is.
+fn inline_code(text: &str, style: Style, code: Style) -> Vec<Span<'static>> {
+    if text.matches('`').count() % 2 == 1 {
+        return vec![Span::styled(text.to_string(), style)];
+    }
+    text.split('`')
+        .enumerate()
+        .filter(|(_, part)| !part.is_empty())
+        .map(|(i, part)| Span::styled(part.to_string(), if i % 2 == 1 { code } else { style }))
+        .collect()
+}
+
+/// How many things `scope`'s conversation shows, to count the new ones.
+pub(crate) fn said(model: &SessionModel, scope: &str) -> usize {
+    items(model, scope).len()
 }
 
 /// Whether `id` is `scope` or hangs somewhere below it.
@@ -244,22 +304,26 @@ fn depth(model: &SessionModel, id: &str) -> usize {
     depth
 }
 
-/// All of `scope`'s tool calls, its subagents' included, as one line: the call
-/// in flight, animated, while one runs; the count once none does. `None` before
-/// the first call.
+/// All of `scope`'s tool calls, its subagents' included, as one line, animated
+/// while any of them runs: the call in flight and how long it has taken (`now`
+/// is the timeline's `now_reference`), or `thinking` between calls; the count
+/// once all have stopped. `None` before anything happened.
 pub(crate) fn tools(
     model: &SessionModel,
     scope: &str,
     width: usize,
+    now: Option<DateTime<Utc>>,
     palette: &rataflow::Palette,
 ) -> Option<Line<'static>> {
     let mut count = 0usize;
     let mut failed = 0usize;
+    let mut alive = false;
     let mut running: Option<&crate::state::session::ToolCallInfo> = None;
     for id in model.spawn_order().filter(|id| within(model, id, scope)) {
         let Some(agent) = model.agent(id) else {
             continue;
         };
+        alive |= agent.status == AgentStatus::Running;
         for call in agent.tool_calls() {
             count += 1;
             failed += usize::from(call.state == ToolState::Err);
@@ -272,17 +336,17 @@ pub(crate) fn tools(
             }
         }
     }
-    if count == 0 {
+    if count == 0 && !alive {
         return None;
     }
     let subtle = Style::default().fg(palette.subtle);
-    let total = if count == 1 {
-        "1 tool".to_string()
-    } else {
-        format!("{count} tools")
+    let total = match count {
+        0 => String::new(),
+        1 => " · 1 tool".to_string(),
+        _ => format!(" · {count} tools"),
     };
     let mut spans = Vec::new();
-    if let Some(call) = running {
+    if alive {
         let frame = web_time::SystemTime::now()
             .duration_since(web_time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() / 80) as usize;
@@ -290,15 +354,29 @@ pub(crate) fn tools(
             format!("{} ", SPINNER[frame % SPINNER.len()]),
             Style::default().fg(palette.accent),
         ));
+    }
+    if let Some(call) = running {
+        // How long it has run, once that is worth reading.
+        let took = call
+            .duration(now)
+            .filter(|d| d.num_seconds() >= 1)
+            .map(|d| format!(" · {}", crate::ui::chips::fmt_dur(d)))
+            .unwrap_or_default();
         let what = describe(&call.name, call.summary.as_deref());
-        let room = width.saturating_sub(total.len() + 16);
+        let room = width.saturating_sub(total.len() + took.len() + 4);
         spans.push(Span::styled(
             truncate(&what, room),
             Style::default().fg(palette.text),
         ));
-        spans.push(Span::styled(format!(" · {total}"), subtle));
+        spans.push(Span::styled(took, Style::default().fg(palette.accent)));
+        spans.push(Span::styled(total, subtle));
+    } else if alive {
+        spans.push(Span::styled(format!("thinking{total}"), subtle));
     } else {
-        spans.push(Span::styled(format!("✓ {total}"), subtle));
+        spans.push(Span::styled(
+            format!("✓ {}", total.trim_start_matches(" · ")),
+            subtle,
+        ));
     }
     if failed > 0 {
         spans.push(Span::styled(
@@ -375,6 +453,15 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
         )
+    }
+
+    /// `at(minute)` as the panel shows it, in local time.
+    fn hm(minute: u32) -> String {
+        at(minute)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string()
     }
 
     fn apply(model: &mut SessionModel, agent: &str, minute: u32, kind: FactKind) {
@@ -476,13 +563,13 @@ mod tests {
             false,
             &rataflow::Palette::DARK,
         ));
-        assert_eq!(
-            shown.matches("conductor → review: someone").count(),
-            1,
-            "{shown}"
+        assert!(shown.contains("  conductor\n"), "{shown}");
+        assert!(
+            !shown.contains("review: someone"),
+            "its own name, once, is the header's: {shown}"
         );
         assert!(shown.contains("… 2 more lines · x"), "{shown}");
-        assert!(shown.contains("you → review: someone"), "{shown}");
+        assert!(shown.contains("  you\n"), "{shown}");
         assert_eq!(
             shown.matches("that finding is intended").count(),
             1,
@@ -506,24 +593,79 @@ mod tests {
         );
         assert_eq!(shown.matches("Review this change.").count(), 1, "{shown}");
         assert!(
+            shown.contains("conductor → review: someone"),
+            "others are named: {shown}"
+        );
+        assert!(shown.contains("  plan: someone\n"), "{shown}");
+        assert!(
             shown.contains("four") && shown.contains("Here is the plan."),
             "{shown}"
         );
     }
 
-    /// Every tool call is one line: the one in flight while it runs.
+    /// Every tool call is one line: the one in flight and how long it has run,
+    /// `thinking` between calls, the count once all have stopped.
     #[test]
     fn all_the_tools_are_one_line() {
-        let model = job();
-        let line = |scope| text(tools(&model, scope, 100, &rataflow::Palette::DARK));
-        let running = line("review");
+        let mut model = job();
+        let line = |model: &SessionModel, scope| {
+            text(tools(model, scope, 100, at(7), &rataflow::Palette::DARK))
+        };
+        let running = line(&model, "review");
         assert!(
-            running.ends_with("run cargo test · 2 tools · ✗ 1\n"),
+            running.ends_with("run cargo test · 2m0s · 2 tools · ✗ 1\n"),
             "{running}"
         );
         assert!(SPINNER.iter().any(|s| running.starts_with(s)), "{running}");
-        assert_eq!(line(MAIN_ID), running, "the root counts its members'");
-        assert_eq!(line("plan"), "", "no calls, no line");
+        // Past the spinner, whose frame is the clock's.
+        let still = |line: String| line.chars().skip(1).collect::<String>();
+        assert_eq!(
+            still(line(&model, MAIN_ID)),
+            still(running),
+            "the root counts its members'"
+        );
+        let plan = line(&model, "plan");
+        assert!(
+            plan.ends_with(" thinking\n"),
+            "no calls, but working: {plan}"
+        );
+        apply(&mut model, "plan", 6, FactKind::Ended(AgentStatus::Done));
+        assert_eq!(line(&model, "plan"), "", "no calls, done: no line");
+        apply(&mut model, "review", 6, FactKind::Ended(AgentStatus::Done));
+        assert_eq!(line(&model, "review"), "✓ 2 tools · ✗ 1\n");
+    }
+
+    /// Code reads apart from prose: blocks without their fences, inline code
+    /// without its backticks.
+    #[test]
+    fn code_reads_apart() {
+        let mut model = SessionModel::new("s".into());
+        let said = "Run `cargo test` now:\n```sh\ncargo   test\n```";
+        apply(&mut model, MAIN_ID, 0, FactKind::Message(said.into()));
+        let palette = rataflow::Palette::DARK;
+        let shown = lines(&model, MAIN_ID, 100, false, &palette);
+        assert_eq!(
+            text(shown.clone()),
+            format!("{}  Run cargo test now:\n       cargo   test\n", hm(0))
+        );
+        let code = Style::default().fg(palette.accent);
+        assert_eq!(shown[0].spans[2].content, "cargo test");
+        assert_eq!(shown[0].spans[2].style, code);
+        assert_eq!(shown[1].spans[1].style, code);
+    }
+
+    /// A time is shown when the minute changes, not on every message.
+    #[test]
+    fn a_time_once_a_minute() {
+        let mut model = SessionModel::new("s".into());
+        for (minute, said) in [(0, "one"), (0, "two"), (1, "three")] {
+            apply(&mut model, MAIN_ID, minute, FactKind::Message(said.into()));
+        }
+        let shown = text(lines(&model, MAIN_ID, 100, false, &rataflow::Palette::DARK));
+        assert_eq!(
+            shown,
+            format!("{}  one\n\n       two\n\n{}  three\n", hm(0), hm(1))
+        );
     }
 
     #[test]

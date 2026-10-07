@@ -325,7 +325,7 @@ impl ChipTray {
 /// Compact tool-duration label: `847ms`, `1.2s`, `42s`, `2m3s`. Sub-second in
 /// milliseconds (most tools are), one decimal under 10s, then whole seconds,
 /// then `m`/`s` — readable at a glance in the narrow chip.
-fn fmt_dur(d: chrono::Duration) -> String {
+pub(crate) fn fmt_dur(d: chrono::Duration) -> String {
     let ms = d.num_milliseconds().max(0);
     if ms < 1000 {
         format!("{ms}ms")

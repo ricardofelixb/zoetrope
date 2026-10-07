@@ -369,8 +369,12 @@ pub fn zoetrope_session_file(path: String, head: String) -> String {
 fn handle_key(key: RKeyEvent, app: &mut App) {
     match key.code {
         // The panel's prompts, folded or whole.
-        RKeyCode::Char('x') | RKeyCode::Char('X') if app.selected_agent_id().is_some() => {
+        RKeyCode::Char('x') | RKeyCode::Char('X') if app.panel_agent().is_some() => {
             app.whole_prompts = !app.whole_prompts;
+            return;
+        }
+        RKeyCode::Char('t') | RKeyCode::Char('T') => {
+            app.show_timeline = !app.show_timeline;
             return;
         }
 
@@ -391,7 +395,7 @@ fn handle_key(key: RKeyEvent, app: &mut App) {
         RKeyCode::Char('o') | RKeyCode::Char('O') => {
             app.camera = Camera::Overview;
             app.camera_glide = None;
-            app.flow.request_fit_view();
+            zoetrope::state::fit(&mut app.flow);
             return;
         }
         RKeyCode::Char('f') | RKeyCode::Char('F') => {
@@ -452,7 +456,7 @@ fn handle_key(key: RKeyEvent, app: &mut App) {
 /// if an agent is selected (key consumed); `false` lets it fall through to the
 /// graph. Mirrors the native handler.
 fn scroll_detail(app: &mut App, delta: i32) -> bool {
-    if app.selected_agent_id().is_none() {
+    if app.panel_agent().is_none() {
         return false;
     }
     if delta < 0 {
@@ -484,6 +488,18 @@ fn handle_mouse(ev: &RMouseEvent, held: bool, app: &mut App) {
         return;
     }
 
+    // The panel's left edge, held, resizes it.
+    let edge = if pressed {
+        app.grab_panel(ev.col, ev.row)
+    } else if moving {
+        held && app.drag_panel(ev.col)
+    } else {
+        std::mem::take(&mut app.panel_drag)
+    };
+    if edge {
+        return;
+    }
+
     let mut me: rataflow::MouseEvent = ev.clone().into();
     // Inject a drag when the button is held during a move (ratzilla moves carry
     // no button), so the flow pans.
@@ -510,6 +526,10 @@ fn install_wheel(app: Rc<RefCell<App>>, last_cell: Rc<Cell<(u16, u16)>>) {
         }
         let (column, row) = last_cell.get();
         let mut app = app.borrow_mut();
+        // Over the panel, the wheel scrolls its conversation.
+        if app.wheel_panel(column, row, if e.delta_y() < 0.0 { -3 } else { 3 }) {
+            return;
+        }
         // `handle_wheel` lives in rataflow: it normalizes browser wheel
         // frequency/deltaMode into discrete zoom notches, so wasm zoom matches the
         // native scroll feel instead of racing. (Terminals keep using scroll events.)
