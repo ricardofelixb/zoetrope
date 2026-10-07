@@ -11,7 +11,9 @@
 //! zoe <job.jsonl>           a job: several sessions, any provider, one tree
 //! zoe <file> --speed N      playback speed multiplier (default 8.0)
 //! zoe --provider <name> ... force the transcript format instead of detecting it
-//! zoe --on-enter <command>  what `enter` runs for the selected agent's session
+//! zoe --on-send <command>   what sends a message written to an agent
+//! zoe --agents-only         the agents' panels only: no root panel, no timeline
+//! zoe --on-root <command>   what clicking the root's card runs instead
 //! zoe inspect <file|id|dir> headless: print the session tree + info
 //! ```
 
@@ -42,13 +44,17 @@ pub enum Cli {
     /// start), a project dir (follow its live session), a session id, or
     /// `None` (the current project). `follow` starts at the live edge instead
     /// of replaying. `provider` forces the format instead of detecting it.
-    /// `on_enter` is what `enter` runs (see [`App::on_enter`]).
+    /// `on_send` sends what `enter` writes (see [`App::on_send`]);
+    /// `agents_only` watches the agents (see [`App::agents_only`]); `on_root`
+    /// is what clicking the root's card runs (see [`App::on_root`]).
     View {
         target: Option<String>,
         follow: bool,
         speed: f64,
         provider: Option<Provider>,
-        on_enter: Option<String>,
+        on_send: Option<String>,
+        agents_only: bool,
+        on_root: Option<String>,
     },
     /// Headless: parse and print the session tree + info; no TUI. The target
     /// resolves like `View`'s: a file, a session id, or a project directory.
@@ -73,9 +79,13 @@ USAGE:
     zoe <job.jsonl>         a job manifest: several sessions as one tree
     zoe <file> --speed N    playback speed (default 8.0)
     zoe --provider <name>   force the format (claude, codex) instead of detecting it
-    zoe --on-enter <cmd>    what enter runs for the selected agent's session, e.g.
-                            \"claude --resume {session}\"; {provider}, {session} and
-                            {cwd} are filled in
+    zoe --on-send <cmd>     what sends a message written to an agent with enter,
+                            e.g. \"say {session} {text}\": {text} is the message,
+                            and {provider}, {session}, {cwd} the agent's
+    zoe --agents-only       watch the agents: the root opens no panel, and the
+                            timeline is hidden (t shows it)
+    zoe --on-root <cmd>     what clicking the root's card runs instead of
+                            selecting it, e.g. a focus of the session's pane
     zoe inspect <file|id>   headless: print the session tree + info
     zoe --version           print the version and exit
 
@@ -123,7 +133,9 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
     let mut follow = false;
     let mut speed = DEFAULT_REPLAY_SPEED;
     let mut provider = None;
-    let mut on_enter = None;
+    let mut on_send = None;
+    let mut agents_only = false;
+    let mut on_root = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -137,6 +149,7 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
                 std::process::exit(0);
             }
             "--follow" => follow = true,
+            "--agents-only" => agents_only = true,
             "--speed" => {
                 let v = args
                     .next()
@@ -149,15 +162,17 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
                 }
             }
             "--provider" => provider = provider_flag(&mut args)?,
-            "--on-enter" => {
-                let command = args.next().ok_or_else(|| {
-                    anyhow!(
-                        "--on-enter requires a command
-
-{USAGE}"
-                    )
-                })?;
-                on_enter = Some(command);
+            "--on-send" => {
+                let command = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--on-send requires a command\n\n{USAGE}"))?;
+                on_send = Some(command);
+            }
+            "--on-root" => {
+                let command = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--on-root requires a command\n\n{USAGE}"))?;
+                on_root = Some(command);
             }
             other if other.starts_with('-') => {
                 bail!("unknown flag {other:?}\n\n{USAGE}");
@@ -176,7 +191,9 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
         follow,
         speed,
         provider,
-        on_enter,
+        on_send,
+        agents_only,
+        on_root,
     })
 }
 
@@ -260,7 +277,9 @@ async fn run_tui(cli: Cli) -> Result<()> {
         follow,
         speed,
         provider,
-        on_enter,
+        on_send,
+        agents_only,
+        on_root,
     } = cli
     else {
         unreachable!("inspect handled in main");
@@ -312,7 +331,16 @@ async fn run_tui(cli: Cli) -> Result<()> {
     });
 
     let mut app = App::new(session_id, mode);
-    app.on_enter = on_enter;
+    app.on_send = on_send;
+    app.agents_only = agents_only;
+    app.on_root = on_root;
+    app.show_timeline = !agents_only;
+    // As the user left this view last time, if they did.
+    let kept = zoetrope::state::remember::file()
+        .and_then(|file| zoetrope::state::remember::load(&file, &app.current_session_id));
+    if let Some(kept) = kept {
+        app.keep(kept);
+    }
     tui::run(app, tail_tx, ui_rx).await
 }
 
@@ -422,7 +450,9 @@ mod tests {
                 follow,
                 speed,
                 provider,
-                on_enter: None,
+                on_send: None,
+                agents_only: false,
+                on_root: None,
             } => {
                 assert_eq!(p, "s.jsonl");
                 assert_eq!(speed, 4.0);
@@ -448,19 +478,32 @@ mod tests {
     }
 
     #[test]
-    fn on_enter_takes_the_command_whole() {
-        match cli(&["--on-enter", "claude --resume {session}", "j.jsonl"]).unwrap() {
+    fn on_send_takes_the_command_whole() {
+        match cli(&[
+            "--on-send",
+            "say {session} {text}",
+            "j.jsonl",
+            "--agents-only",
+            "--on-root",
+            "focus it",
+        ])
+        .unwrap()
+        {
             Cli::View {
                 target: Some(p),
-                on_enter: Some(command),
+                on_send: Some(command),
+                agents_only: true,
+                on_root: Some(root),
                 ..
             } => {
                 assert_eq!(p, "j.jsonl");
-                assert_eq!(command, "claude --resume {session}");
+                assert_eq!(command, "say {session} {text}");
+                assert_eq!(root, "focus it");
             }
             other => panic!("got {other:?}"),
         }
-        assert!(cli(&["--on-enter"]).is_err());
+        assert!(cli(&["--on-send"]).is_err());
+        assert!(cli(&["--on-root"]).is_err());
     }
 
     #[test]

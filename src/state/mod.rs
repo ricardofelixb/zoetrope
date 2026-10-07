@@ -10,13 +10,14 @@
 // them is re-exported below, as the types of `App`'s fields.
 pub(crate) mod graph;
 pub mod info;
+pub mod remember;
 pub mod render;
 pub mod session;
 pub(crate) mod timeline;
 
 // `App`'s public fields, nameable from outside without exposing the module
 // layout they live in.
-pub use self::graph::AgentFlow;
+pub use self::graph::{AgentFlow, fit};
 pub use self::info::SessionInfo;
 pub use self::timeline::Timeline;
 pub use crate::ui::chips::ChipTray;
@@ -197,6 +198,17 @@ pub struct App {
     /// Screen rect of the scrubber bar from the last render, so the input
     /// handler can map a click/drag on it to a seek. `None` when not drawn.
     pub scrubber_area: Option<ratatui::layout::Rect>,
+    /// Screen rect of the detail panel from the last render, so the wheel over
+    /// it scrolls the conversation rather than zooming the graph.
+    pub panel_area: Option<ratatui::layout::Rect>,
+    /// The detail panel's share of the width, in percent; dragging its left
+    /// edge changes it.
+    pub panel_share: u16,
+    /// Whether the panel's left edge is held, being dragged.
+    pub panel_drag: bool,
+    /// How many things the panel's conversation showed when it was scrolled up
+    /// off its newest line, to count what is new since. `None` while it follows.
+    pub detail_seen: Option<usize>,
     /// Cached per-column scrubber tallies (head-independent), recomputed only when
     /// the item count or bar width changes — not every frame. See
     /// [`crate::ui::ScrubberTally`].
@@ -215,6 +227,11 @@ pub struct App {
     /// `center_on` probes the last-rendered size, so centering at event time
     /// would target the pre-split width.
     pub pending_center: Option<String>,
+    /// A kept selection (see [`keep`](Self::keep)) waiting for its agent's card
+    /// to appear.
+    pub pending_select: Option<String>,
+    /// A kept camera (pan and zoom) waiting for the first cards to frame.
+    pub pending_camera: Option<rataflow::Viewport>,
     /// Scrub target (bar fraction) queued by input handling, applied once per
     /// frame by [`tick_timeline`](Self::tick_timeline) — a burst of drag events
     /// costs ONE seek (a backward seek rebuilds the whole model), not one per
@@ -225,10 +242,81 @@ pub struct App {
     snapshots: Vec<Snapshot>,
     /// Whether the detail panel shows long prompts whole (`x`).
     pub whole_prompts: bool,
-    /// The command `enter` runs for the selected agent's session (`--on-enter`):
-    /// words split on whitespace, `{provider}`, `{session}` and `{cwd}` filled in
-    /// from [`session_of`](Self::session_of). `None`: `enter` does nothing.
-    pub on_enter: Option<String>,
+    /// The command a message for an agent is sent with (`--on-send`): words
+    /// split on whitespace, then `{text}` filled in with the message, and
+    /// `{provider}`, `{session}` and `{cwd}` with the agent's session
+    /// ([`session_of`](Self::session_of)). `None`: `enter` writes nothing.
+    pub on_send: Option<String>,
+    /// The message being written (`enter`), until it is sent or dropped.
+    pub draft: Option<Draft>,
+    /// What clicking the root's card runs instead of selecting it (`--on-root`),
+    /// e.g. a focus of the pane the session runs in. Words split on whitespace.
+    pub on_root: Option<String>,
+    /// Watching the agents, not the session's own conversation
+    /// (`--agents-only`): the root's card opens no panel.
+    pub agents_only: bool,
+    /// Whether the replay timeline is shown (`t`; off with `--agents-only`).
+    pub show_timeline: bool,
+}
+
+/// A message being written: its text, the cursor (a char index into it), and
+/// the card it was begun on, whose agent it is for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Draft {
+    pub text: String,
+    pub cursor: usize,
+    pub about: String,
+}
+
+impl Draft {
+    fn at(&self, chars: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(chars)
+            .map_or(self.text.len(), |(i, _)| i)
+    }
+
+    /// Type `text` at the cursor (a key, or a paste, its newlines as spaces).
+    pub fn insert(&mut self, text: &str) {
+        let text: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let at = self.at(self.cursor);
+        self.text.insert_str(at, &text);
+        self.cursor += text.chars().count();
+    }
+
+    /// Delete the char before the cursor.
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            let at = self.at(self.cursor);
+            self.text.remove(at);
+        }
+    }
+
+    /// Delete the char under the cursor.
+    pub fn delete(&mut self) {
+        if self.cursor < self.text.chars().count() {
+            let at = self.at(self.cursor);
+            self.text.remove(at);
+        }
+    }
+
+    /// Move the cursor by `by` chars, within the text.
+    pub fn step(&mut self, by: isize) {
+        let len = self.text.chars().count();
+        self.cursor = self.cursor.saturating_add_signed(by).min(len);
+    }
+
+    pub fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.cursor = self.text.chars().count();
+    }
 }
 
 /// A session an agent's card stands for: what resuming it needs.
@@ -261,15 +349,25 @@ impl App {
             camera_glide: None,
             timeline: Timeline::new(),
             scrubber_area: None,
+            panel_area: None,
+            panel_share: remember::Kept::default().panel_share,
+            panel_drag: false,
+            detail_seen: None,
             scrubber_tally: None,
             last_batch_at: None,
             session_info: SessionInfo::default(),
             show_info: false,
             pending_center: None,
+            pending_select: None,
+            pending_camera: None,
             pending_seek: None,
             snapshots: Vec::new(),
             whole_prompts: false,
-            on_enter: None,
+            on_send: None,
+            draft: None,
+            on_root: None,
+            agents_only: false,
+            show_timeline: true,
         }
     }
 
@@ -630,7 +728,7 @@ impl App {
             // safe before first render).
             Camera::Overview => {
                 if (structural || sync_structural) && self.session.agent_count() > 0 {
-                    self.flow.request_fit_view();
+                    graph::fit(&mut self.flow);
                 }
             }
             // Follow: keep the most recently active agent centered.
@@ -799,7 +897,59 @@ impl App {
         if structural {
             self.layout_dirty = true;
         }
+        // A kept camera and selection, once there are cards to show. The camera
+        // stays where it was kept, so the selection is not centered then.
+        if self.session.agent_count() > 0
+            && let Some(viewport) = self.pending_camera.take()
+        {
+            self.flow.viewport = viewport;
+        }
+        if let Some(id) = self
+            .pending_select
+            .take_if(|id| self.flow.node(id).is_some())
+        {
+            self.flow.select_node(&id);
+            if self.camera != Camera::Manual {
+                self.pending_center = Some(id);
+            }
+        }
         structural
+    }
+
+    /// The view's state to keep across runs (see [`remember`]).
+    pub fn kept(&self) -> remember::Kept {
+        remember::Kept {
+            selected: self
+                .selected_agent_id()
+                .or_else(|| self.pending_select.clone()),
+            panel_share: self.panel_share,
+            show_timeline: self.show_timeline,
+            whole_prompts: self.whole_prompts,
+            follow: self.camera == Camera::Follow,
+            camera: (self.camera == Camera::Manual).then(|| {
+                let v = self.pending_camera.unwrap_or(self.flow.viewport);
+                (v.x, v.y, v.zoom)
+            }),
+        }
+    }
+
+    /// Take up a kept state: the selection once its agent's card appears, and
+    /// the camera where the user left it, following, or else framing everything.
+    pub fn keep(&mut self, kept: remember::Kept) {
+        self.pending_select = kept.selected;
+        self.panel_share = kept.panel_share;
+        self.show_timeline = kept.show_timeline;
+        self.whole_prompts = kept.whole_prompts;
+        self.camera = if kept.follow {
+            Camera::Follow
+        } else if kept.camera.is_some() {
+            Camera::Manual
+        } else {
+            Camera::Overview
+        };
+        self.pending_camera = kept
+            .camera
+            .map(|(x, y, zoom)| rataflow::Viewport { x, y, zoom });
     }
 
     /// Tidy the graph on demand (`r`): run Sugiyama now and reframe for the
@@ -810,7 +960,7 @@ impl App {
         graph::relayout(&mut self.flow);
         self.layout_dirty = false;
         match self.camera {
-            Camera::Overview => self.flow.request_fit_view(),
+            Camera::Overview => graph::fit(&mut self.flow),
             Camera::Follow => self.track_activity(),
             Camera::Manual => {}
         }
@@ -953,6 +1103,57 @@ impl App {
     /// during render; copy it out before borrowing `app` mutably).
     pub fn selected_agent_id(&self) -> Option<String> {
         self.flow.selected_nodes().next().map(|n| n.id.clone())
+    }
+
+    /// The selected agent whose panel is shown: any but the root when watching
+    /// only the agents.
+    pub fn panel_agent(&self) -> Option<String> {
+        self.selected_agent_id()
+            .filter(|id| !(self.agents_only && id == MAIN_ID))
+    }
+
+    /// Scroll the detail panel by `delta` lines when (`column`, `row`) is over
+    /// it, and say whether it was. Up stops following the newest line; the
+    /// renderer clamps the offset and re-attaches at the bottom.
+    pub fn wheel_panel(&mut self, column: u16, row: u16, delta: i32) -> bool {
+        let Some(panel) = self.panel_area else {
+            return false;
+        };
+        if !panel.contains(ratatui::layout::Position::new(column, row)) {
+            return false;
+        }
+        if delta < 0 {
+            self.detail_follow = false;
+        }
+        self.detail_scroll =
+            (i32::from(self.detail_scroll) + delta).clamp(0, i32::from(u16::MAX)) as u16;
+        true
+    }
+
+    /// A press at a cell: on the panel's left edge (or the cell before it) it
+    /// takes hold of the edge, and returns `true`.
+    pub fn grab_panel(&mut self, column: u16, row: u16) -> bool {
+        self.panel_drag = self.panel_area.is_some_and(|panel| {
+            (panel.x.saturating_sub(1)..=panel.x).contains(&column)
+                && (panel.y..panel.bottom()).contains(&row)
+        });
+        self.panel_drag
+    }
+
+    /// The held edge dragged to `column`: the panel takes the width right of
+    /// it, between a fifth and nine tenths of the screen (the canvas it splits
+    /// starts at the left edge). `false` when no edge is held.
+    pub fn drag_panel(&mut self, column: u16) -> bool {
+        let Some(width) = self
+            .panel_area
+            .filter(|_| self.panel_drag)
+            .map(|p| p.right())
+        else {
+            return false;
+        };
+        let share = u32::from(width.saturating_sub(column)) * 100 / u32::from(width.max(1));
+        self.panel_share = share.clamp(20, 90) as u16;
+        true
     }
 
     /// The session behind an agent's card, when the card is a whole session: the
@@ -1368,6 +1569,60 @@ mod tests {
         );
         assert_eq!(app.flow.viewport.zoom, viewport.zoom, "viewport survived");
         assert_eq!(app.selected_agent_id().as_deref(), Some("sub1"));
+    }
+
+    /// A kept view is taken up as it was left: its selection once that agent's
+    /// card appears, until then still the one kept.
+    #[test]
+    fn a_kept_view_selects_its_agent_once_it_appears() {
+        let t0: chrono::DateTime<chrono::Utc> = "2026-06-05T10:00:00.000Z".parse().unwrap();
+        let mut app = App::new("focused".to_string(), Mode::Replay);
+        let kept = remember::Kept {
+            selected: Some("sub1".into()),
+            panel_share: 40,
+            follow: true,
+            ..remember::Kept::default()
+        };
+        app.keep(kept.clone());
+        assert_eq!(app.kept(), kept, "not there yet, still kept");
+        app.handle_ui_event(UiEvent::ReplayLoaded {
+            session_id: "focused".into(),
+            items: (0..2)
+                .map(|i| {
+                    crate::tailer::ReplayItem::at(
+                        Some(t0 + chrono::Duration::seconds(i as i64)),
+                        meta_update(&format!("sub{i}")).facts,
+                    )
+                })
+                .collect(),
+            speed: 8.0,
+            info: Default::default(),
+        });
+        app.go_live();
+        assert!(app.pending_select.is_none());
+        assert_eq!(app.camera, Camera::Follow);
+        assert_eq!(app.panel_share, 40);
+
+        // A camera the user took is kept where they left it.
+        let mut app = App::new("focused".to_string(), Mode::Replay);
+        let kept = remember::Kept {
+            camera: Some((3.0, -7.0, 0.6)),
+            ..remember::Kept::default()
+        };
+        app.keep(kept.clone());
+        assert_eq!((app.camera, app.kept()), (Camera::Manual, kept));
+        app.handle_ui_event(UiEvent::ReplayLoaded {
+            session_id: "focused".into(),
+            items: vec![crate::tailer::ReplayItem::at(
+                Some(t0),
+                meta_update("sub0").facts,
+            )],
+            speed: 8.0,
+            info: Default::default(),
+        });
+        app.go_live();
+        let v = app.flow.viewport;
+        assert_eq!((v.x, v.y, v.zoom), (3.0, -7.0, 0.6));
     }
 
     #[test]

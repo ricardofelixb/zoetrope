@@ -312,6 +312,32 @@ impl UserEntry {
     /// heuristic the era spine always used — anything that isn't an async agent's
     /// `<task-notification>` report. Ground truth when we have it; the old
     /// heuristic only where the format can't tell us.
+    /// The text of a person's message sent with other parts, such as an image:
+    /// its text blocks, when the entry says a person sent it. Array content is
+    /// otherwise tool results and injected context, so the origin decides.
+    pub fn human_blocks_text(&self) -> Option<String> {
+        let Some(UserContent::Blocks(blocks)) = &self.message.as_ref()?.content else {
+            return None;
+        };
+        let kind = self
+            .envelope
+            .origin
+            .as_ref()
+            .and_then(|o| o.kind.as_deref());
+        if kind != Some("human") {
+            return None;
+        }
+        let text: Vec<&str> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                UserContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let text = text.join("\n");
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     pub fn is_human_prompt(&self) -> bool {
         let Some(text) = self.prompt_text() else {
             return false;
@@ -395,13 +421,40 @@ pub struct SystemEntry {
     pub subtype: Option<String>,
 }
 
-/// An `attachment` entry. Not graph material.
+/// An `attachment` entry. Context injected into a turn; graph material only
+/// as a person's message queued into it ([`queued_prompt`](Self::queued_prompt)).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AttachmentEntry {
     #[serde(flatten)]
     pub envelope: Envelope,
     #[serde(default)]
     pub attachment: Option<serde_json::Value>,
+}
+
+impl AttachmentEntry {
+    /// A message a person sent while the agent worked, which joins its turn
+    /// instead of starting one: `{"type":"queued_command","commandMode":"prompt",
+    /// "origin":{"kind":"human"},"prompt":…}`, the prompt a string or text parts.
+    pub fn queued_prompt(&self) -> Option<String> {
+        let a = self.attachment.as_ref()?;
+        let field = |pointer: &str| a.pointer(pointer).and_then(serde_json::Value::as_str);
+        if field("/type") != Some("queued_command")
+            || field("/commandMode") != Some("prompt")
+            || field("/origin/kind") != Some("human")
+        {
+            return None;
+        }
+        let text = match a.get("prompt")? {
+            serde_json::Value::String(text) => text.clone(),
+            serde_json::Value::Array(parts) => parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => return None,
+        };
+        (!text.trim().is_empty()).then_some(text)
+    }
 }
 
 /// The `ai-title` flat metadata entry — provides the session title.

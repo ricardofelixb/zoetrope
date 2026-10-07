@@ -41,6 +41,15 @@ pub fn new_flow() -> AgentFlow {
     flow
 }
 
+/// The most a fit frames the graph at: the cards' own size. A few cards fill
+/// the canvas no further, and zooming in past it stays the user's to do.
+const FIT_ZOOM: f64 = 1.0;
+
+/// Frame every card (deferred to the next render), no larger than [`FIT_ZOOM`].
+pub fn fit(flow: &mut AgentFlow) {
+    flow.request_fit_view_with_options(rataflow::FitViewOptions::default().with_max_zoom(FIT_ZOOM));
+}
+
 /// Title line for a node: the agent type the provider recorded, else the
 /// generic label for its kind. No provider name appears here; the root
 /// agent's is stated by its provider like any other agent's.

@@ -8,7 +8,9 @@
 
 use std::io::stdout;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
@@ -20,6 +22,9 @@ use crate::ui;
 
 /// Frame/tick cadence. 16 ms ≈ 60 fps so marching-ant edges stay smooth.
 const TICK: Duration = Duration::from_millis(16);
+
+/// How long the view's state must hold still before it is kept.
+const KEEP_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Interval for re-deriving time-based agent status (see `App::status_tick`).
 const STATUS_TICK: Duration = Duration::from_secs(1);
@@ -38,7 +43,8 @@ pub async fn run(
     mut ui_rx: mpsc::Receiver<UiEvent>,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
-    execute!(stdout(), EnableMouseCapture)?;
+    // A paste arrives whole, as one event, so it lands in a message being written.
+    execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     install_panic_hook();
 
     // Crossterm event reader → unbounded channel (input must never block the
@@ -53,6 +59,12 @@ pub async fn run(
             }
         }
     });
+
+    // The view's state is kept once it has settled (a drag changes it every
+    // frame): closing the pane kills zoe, so there may be no exit to keep it at.
+    let keep_at = crate::state::remember::file();
+    let mut kept = app.kept();
+    let mut changed: Option<Instant> = None;
 
     let mut tick = tokio::time::interval(TICK);
     let mut last_tick = Instant::now();
@@ -130,13 +142,29 @@ pub async fn run(
             app.handle_ui_event(ev);
         }
 
+        let now_kept = app.kept();
+        if now_kept != kept {
+            kept = now_kept;
+            changed = Some(Instant::now());
+        }
+        let settled = changed.is_some_and(|at| at.elapsed() >= KEEP_AFTER);
+        if let (Some(file), true) = (
+            &keep_at,
+            settled || (changed.is_some() && (quit || app.should_quit)),
+        ) {
+            changed = None;
+            if let Err(e) = crate::state::remember::save(file, &app.current_session_id, &kept) {
+                app.last_error = Some(format!("keeping the view: {e}"));
+            }
+        }
+
         if quit || app.should_quit {
             break Ok(());
         }
     };
 
     // Clean restore regardless of how the loop ended.
-    let _ = execute!(stdout(), DisableMouseCapture);
+    let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     result
 }
@@ -150,7 +178,7 @@ pub async fn run(
 pub fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(stdout(), DisableMouseCapture);
+        let _ = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
         prev(info);
     }));
 }

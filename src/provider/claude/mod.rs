@@ -298,6 +298,14 @@ pub fn facts(source: &Source, entry: &Entry) -> Vec<Fact> {
                     });
                 }
             }
+            // A person's message with an image or other parts beside its text.
+            if is_main && let Some(text) = e.human_blocks_text() {
+                out.push(Fact {
+                    agent: Some(owner.clone()),
+                    ts,
+                    kind: FactKind::Prompt(text),
+                });
+            }
             // A missing `is_error` means success in this format (verified against
             // real data), so every result carries an outcome.
             if let Some(msg) = &e.message
@@ -357,6 +365,16 @@ pub fn facts(source: &Source, entry: &Entry) -> Vec<Fact> {
             }
         }
         Entry::FileHistorySnapshot(_) => out.push(meta(FactKind::Tally("file edits".into()))),
+        // A person's message sent while the root worked, queued into its turn.
+        Entry::Attachment(e) if matches!(source, Source::Main) => {
+            if let Some(text) = e.queued_prompt() {
+                out.push(Fact {
+                    agent: Some(MAIN_ID.to_string()),
+                    ts: e.envelope.timestamp,
+                    kind: FactKind::Prompt(text),
+                });
+            }
+        }
         // System, attachment, `started` ledgers, unknown: nothing is stated.
         _ => {}
     }

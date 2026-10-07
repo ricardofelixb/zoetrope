@@ -33,12 +33,23 @@ use crate::state::{App, Camera, Mode, Transport};
 /// is selected, and draws the status bar (title, live/replay indicator, agent &
 /// tool counts, pause state, key hints).
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let area = frame.area();
+    // A message being written takes the bottom rows, under everything else.
+    let (area, draft_area) = if let Some(draft) = &app.draft {
+        let rows = draft_rows(draft, frame.area().width.saturating_sub(2)).len();
+        let [rest, draft] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(rows.min(DRAFT_ROWS) as u16 + 2),
+        ])
+        .areas(frame.area());
+        (rest, Some(draft))
+    } else {
+        (frame.area(), None)
+    };
 
     // Top: canvas (fill); one bordered timeline panel — the scrubber (6 rows),
     // plus an event-log line and a single divider on top when the session has
     // prompts (→ 8 rows); bottom: a one-row status bar.
-    let show_scrubber = app.timeline.has_span();
+    let show_scrubber = app.show_timeline && app.timeline.has_span();
     let show_log = show_scrubber && !app.session.prompts.is_empty();
     let (canvas_area, timeline_area, status_area) = if show_scrubber {
         let panel_h = if show_log { 8 } else { 6 };
@@ -61,15 +72,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // Copy the selected agent id out *before* borrowing the flow mutably for
     // the canvas render (borrow split: companions take &Flow, Widget is &mut).
-    let selected = app.selected_agent_id();
+    let selected = app.panel_agent();
 
-    // When an agent is selected, split the canvas 30/70 for the detail panel —
+    // When an agent is selected, split the canvas for the detail panel (in half
+    // until its edge is dragged) —
     // the panel is what you're reading; the canvas only keeps the selected
     // node (click-centered) in view for orientation.
     let (flow_area, panel_area) = if selected.is_some() {
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
-                .areas(canvas_area);
+        let share = app.panel_share;
+        let [left, right] = Layout::horizontal([
+            Constraint::Percentage(100 - share),
+            Constraint::Percentage(share),
+        ])
+        .areas(canvas_area);
         (left, Some(right))
     } else {
         (canvas_area, None)
@@ -87,6 +102,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         app.center_node(&id, false);
     }
 
+    app.panel_area = panel_area;
     if let (Some(panel_area), Some(id)) = (panel_area, selected.as_ref()) {
         panel::render(frame, panel_area, app, id);
     }
@@ -103,6 +119,82 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_info {
         render_info(frame, area, app);
     }
+    if let Some(draft_area) = draft_area {
+        render_draft(frame, draft_area, app);
+    }
+}
+
+/// Rows a message being written grows to before it scrolls.
+const DRAFT_ROWS: usize = 3;
+
+/// A draft's text cut into rows `width` chars wide, with a cell after its end
+/// for the cursor: each row's first char index and its chars.
+fn draft_rows(draft: &crate::state::Draft, width: u16) -> Vec<(usize, Vec<char>)> {
+    let chars: Vec<char> = draft.text.chars().collect();
+    let width = usize::from(width.max(1));
+    (0..=chars.len() / width)
+        .map(|row| {
+            let from = row * width;
+            (from, chars[from..(from + width).min(chars.len())].to_vec())
+        })
+        .collect()
+}
+
+/// The message being written: what it is about, its text with the cursor, and
+/// the keys that send or drop it.
+fn render_draft(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(draft) = &app.draft else {
+        return;
+    };
+    let palette = app.flow.theme.palette();
+    let bg = Style::default().bg(palette.canvas_bg);
+    let name = app
+        .session
+        .agent(&draft.about)
+        .and_then(|a| a.agent_type.clone())
+        .unwrap_or_else(|| draft.about.clone());
+    let title = format!(" tell {name} ");
+    let keys = " enter send · esc drop ";
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(bg.fg(palette.accent))
+        .style(bg)
+        .title_top(Line::from(title).style(bg.fg(palette.accent).add_modifier(Modifier::BOLD)))
+        .title_bottom(
+            Line::from(keys)
+                .right_aligned()
+                .style(bg.fg(palette.subtle)),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    // The rows around the cursor, the newest it can show.
+    let rows = draft_rows(draft, inner.width);
+    let width = usize::from(inner.width.max(1));
+    let at = draft.cursor.min(draft.text.chars().count());
+    let first = (at / width + 1).saturating_sub(usize::from(inner.height));
+    let text = bg.fg(palette.text);
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .skip(first)
+        .map(|(from, chars)| {
+            let mut spans = Vec::new();
+            for (i, c) in chars.iter().enumerate() {
+                let style = if from + i == at {
+                    text.add_modifier(Modifier::REVERSED)
+                } else {
+                    text
+                };
+                spans.push(Span::styled(c.to_string(), style));
+            }
+            if at == from + chars.len() && chars.len() < width {
+                spans.push(Span::styled(" ", text.add_modifier(Modifier::REVERSED)));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).style(bg), inner);
 }
 
 /// Centered session-info overlay (`i`): the untimed session-level metadata that
@@ -619,7 +711,7 @@ fn render_help(frame: &mut Frame, area: Rect, palette: &rataflow::Palette) {
             Span::styled(" timeline  ", key),
             Span::styled("[ ] step prompts ", txt),
             Span::styled("◆", bg.fg(palette.accent)),
-            Span::styled(" · End/g live · drag to seek", txt),
+            Span::styled(" · End/g live · drag to seek · t hide", txt),
         ]),
         Line::from(vec![
             Span::styled(" pacing    ", key),
@@ -657,8 +749,8 @@ fn render_help(frame: &mut Frame, area: Rect, palette: &rataflow::Palette) {
     // Native only, above `quit`: a browser cannot start a process.
     if !cfg!(target_arch = "wasm32") {
         let open = Line::from(vec![
-            Span::styled(" open      ", key),
-            Span::styled("enter the agent's session (--on-enter)", txt),
+            Span::styled(" tell      ", key),
+            Span::styled("enter on an agent · enter send · esc drop", txt),
         ]);
         lines.insert(lines.len() - 4, open);
     }
@@ -734,15 +826,6 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let mut left: Vec<Span> = vec![
-        // Wordmark: the gold identity chip in every screenshot.
-        Span::styled(
-            " zoetrope ",
-            Style::default()
-                .bg(palette.accent)
-                .fg(palette.canvas_bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ", bg),
         Span::styled(
             badge,
             bg.fg(palette.canvas_bg)
