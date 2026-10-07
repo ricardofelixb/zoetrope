@@ -8,6 +8,7 @@
 //! zoe <id>                  replay a session by id (or a unique prefix)
 //! zoe <dir>                 follow another project's live session
 //! zoe <file> --follow       follow a file's live edge instead of replaying
+//! zoe <job.jsonl>           a job: several sessions, any provider, one tree
 //! zoe <file> --speed N      playback speed multiplier (default 8.0)
 //! zoe --provider <name> ... force the transcript format instead of detecting it
 //! zoe inspect <file|id|dir> headless: print the session tree + info
@@ -18,7 +19,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 
-use zoetrope::provider::{Provider, ReadMode, Target, open};
+use zoetrope::fact::Statement;
+use zoetrope::provider::{Provider, ReadMode, Session, Target, open};
 use zoetrope::state::session::SessionModel;
 use zoetrope::state::{App, Mode};
 use zoetrope::tailer::{TailRequest, UiEvent};
@@ -65,6 +67,7 @@ USAGE:
     zoe <id>                replay a session by id, or a unique prefix of one
     zoe <dir>               follow another project's live session
     zoe <file> --follow     follow a file's live edge instead of replaying
+    zoe <job.jsonl>         a job manifest: several sessions as one tree
     zoe <file> --speed N    playback speed (default 8.0)
     zoe --provider <name>   force the format (claude, codex) instead of detecting it
     zoe inspect <file|id>   headless: print the session tree + info
@@ -166,35 +169,21 @@ fn parse_session_fully(
     target: &Target,
     only: Option<Provider>,
 ) -> Result<(SessionModel, zoetrope::state::SessionInfo)> {
-    let session = open(target, only)?;
-    let mut model = SessionModel::new(session.id.clone());
+    let (id, statements) = match target {
+        Target::Job(manifest) => (tailer::job_session_id(manifest), tailer::read_job(manifest)),
+        _ => {
+            let session = open(target, only)?;
+            (session.id.clone(), read_whole(&session)?)
+        }
+    };
+    let mut model = SessionModel::new(id);
     let mut info = zoetrope::state::SessionInfo::default();
-    let p = session.provider;
-    let mut apply = |mut statement: zoetrope::fact::Statement| {
+    for mut statement in statements {
         for f in statement.take_session_meta() {
             info.apply(&f);
         }
         for f in &statement.facts {
             model.apply_fact(f);
-        }
-    };
-    // Order is not critical — the model is fold-order independent — so files
-    // go in as the session lists them, root first.
-    for f in session.every_file() {
-        let text = std::fs::read_to_string(&f.path)
-            .with_context(|| format!("reading {}", f.path.display()))?;
-        match f.read {
-            ReadMode::Tail => {
-                let mut stream = p.stream_for(f);
-                for statement in text.lines().filter_map(|l| stream.push(l)) {
-                    apply(statement);
-                }
-            }
-            ReadMode::Whole => {
-                if let Some(statement) = p.sidecar(f, &text) {
-                    apply(statement);
-                }
-            }
         }
     }
 
@@ -208,6 +197,26 @@ fn parse_session_fully(
     model.recompute_liveness(Some(chrono::Utc::now()));
 
     Ok((model, info))
+}
+
+/// What every file of a session states. Order is not critical — the model is
+/// fold-order independent — so files go in as the session lists them, root
+/// first.
+fn read_whole(session: &Session) -> Result<Vec<Statement>> {
+    let p = session.provider;
+    let mut statements = Vec::new();
+    for f in session.every_file() {
+        let text = std::fs::read_to_string(&f.path)
+            .with_context(|| format!("reading {}", f.path.display()))?;
+        match f.read {
+            ReadMode::Tail => {
+                let mut stream = p.stream_for(f);
+                statements.extend(text.lines().filter_map(|l| stream.push(l)));
+            }
+            ReadMode::Whole => statements.extend(p.sidecar(f, &text)),
+        }
+    }
+    Ok(statements)
 }
 
 /// Run the `inspect` subcommand: fully parse the session and print a tree to
@@ -259,6 +268,11 @@ async fn run_tui(cli: Cli) -> Result<()> {
             let session_id = open(&target, provider).map(|s| s.id).unwrap_or_default();
             (session_id, Mode::Live, false, DEFAULT_REPLAY_SPEED)
         }
+        // A job → bulk-load every member + tail, like a file.
+        Target::Job(manifest) => {
+            let mode = if follow { Mode::Live } else { Mode::Replay };
+            (tailer::job_session_id(manifest), mode, true, speed)
+        }
     };
 
     // Bounded request/event channels for backpressure.
@@ -282,13 +296,17 @@ async fn run_tui(cli: Cli) -> Result<()> {
     tui::run(app, tail_tx, ui_rx).await
 }
 
-/// What a positional argument means: an existing file is a session's file, an
-/// existing directory is a project to follow, anything shaped like a path
-/// that does not exist is a typo, and the rest is a session id or a prefix
-/// of one. Shared by `zoe <target>` and `zoe inspect <target>`.
+/// What a positional argument means: an existing file is a job if its first
+/// line says so and a session's file otherwise, an existing directory is a
+/// project to follow, anything shaped like a path that does not exist is a
+/// typo, and the rest is a session id or a prefix of one. Shared by
+/// `zoe <target>` and `zoe inspect <target>`.
 fn resolve_target(arg: String) -> Result<Target> {
     let path = PathBuf::from(&arg);
     if path.is_file() {
+        if zoetrope::job::read_header(&path).is_some() {
+            return Ok(Target::Job(path));
+        }
         return Ok(Target::Path(path));
     }
     if path.is_dir() {
@@ -454,6 +472,20 @@ mod tests {
             matches!(resolve_target("01a03eb1".into()), Ok(Target::Id(id)) if id == "01a03eb1")
         );
         assert!(matches!(resolve_target(".".into()), Ok(Target::Here(_))));
+    }
+
+    #[test]
+    fn a_file_with_a_job_header_is_a_job() {
+        let dir = std::env::temp_dir().join(format!("zoetrope-jobtarget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let job = dir.join("live.jsonl");
+        std::fs::write(&job, "{\"zoe\":\"job\",\"v\":1}\n").unwrap();
+        let session = dir.join("88888888-8888-8888-8888-888888888888.jsonl");
+        std::fs::write(&session, "{\"type\":\"user\",\"message\":{}}\n").unwrap();
+        let arg = |p: &std::path::Path| p.display().to_string();
+        assert!(matches!(resolve_target(arg(&job)), Ok(Target::Job(p)) if p == job));
+        assert!(matches!(resolve_target(arg(&session)), Ok(Target::Path(_))));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

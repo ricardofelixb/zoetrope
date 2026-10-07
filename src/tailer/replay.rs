@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use crate::provider::{Provider, ReadMode, Session, Stream, Target, open};
 
 use super::item::{ReplayItem, date_and_sort};
-use super::live::{LiveSession, SnapshotSeed, tail_loop};
+use super::live::{Feed, LiveSession, SnapshotSeed, tail_loop};
 use super::{Flow, TailRequest, UiEvent};
 
 /// Replay feeder: open the session, parse everything on disk, merge by
@@ -82,7 +82,7 @@ pub(crate) async fn run_replay(
     let mut live = LiveSession::new(session, None, only);
     live.seed(seed);
 
-    tail_loop(live, session_id, ui_tx, req_rx).await
+    tail_loop(Feed::Session(Box::new(live)), session_id, ui_tx, req_rx).await
 }
 
 /// Build the merged, timestamp-ordered replay item list from all of a
@@ -122,16 +122,20 @@ pub(crate) fn build_replay(
         }
     }
 
-    // Route untimed session-level metadata into the info store and DROP it
-    // from the timeline — it isn't activity, and being untimed it would clump at
-    // the front. Done here, in file (chronological) order, so latest-wins holds.
+    let (items, info) = settle(items);
+    (items, info, seed)
+}
+
+/// Finish a bulk-read stream for the App: route untimed session-level metadata
+/// into the info store and DROP it from the timeline (it isn't activity, and
+/// being untimed it would clump at the front), then date the undated items
+/// (sidecar births, ledger endings) and stably sort. Items come in file
+/// (chronological) order, so latest-wins holds for the metadata.
+pub(crate) fn settle(mut items: Vec<ReplayItem>) -> (Vec<ReplayItem>, crate::state::SessionInfo) {
     let mut info = crate::state::SessionInfo::default();
     items.retain_mut(|item| item.take_session_meta(&mut info));
-
-    // Date the undated items (sidecar births, ledger endings) and stably sort.
     date_and_sort(&mut items);
-
-    (items, info, seed)
+    (items, info)
 }
 
 /// Parse all complete lines of a file into [`ReplayItem`]s through `stream`.

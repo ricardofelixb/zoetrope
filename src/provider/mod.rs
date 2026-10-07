@@ -296,6 +296,9 @@ pub enum Target {
     Id(String),
     /// The newest session of the project at this working directory.
     Here(PathBuf),
+    /// A job manifest: several sessions shown as one tree ([`crate::job`]).
+    /// The core reads it; no provider opens it.
+    Job(PathBuf),
 }
 
 /// Why [`open`] found nothing.
@@ -308,6 +311,8 @@ pub enum OpenError {
     NotFound(Target),
     /// The id prefix matched more than one session.
     Ambiguous(Vec<String>),
+    /// A job manifest is several sessions, never one.
+    Job(PathBuf),
 }
 
 impl std::fmt::Display for OpenError {
@@ -317,12 +322,15 @@ impl std::fmt::Display for OpenError {
                 write!(f, "not a transcript any provider reads: {}", p.display())
             }
             OpenError::Orphan(p) => write!(f, "no session found for {}", p.display()),
-            OpenError::NotFound(Target::Path(p)) => write!(f, "not found: {}", p.display()),
+            OpenError::NotFound(Target::Path(p) | Target::Job(p)) => {
+                write!(f, "not found: {}", p.display())
+            }
             OpenError::NotFound(Target::Id(id)) => write!(f, "no session with id {id}"),
             OpenError::NotFound(Target::Here(cwd)) => {
                 write!(f, "no session for {}", cwd.display())
             }
             OpenError::Ambiguous(ids) => write!(f, "ambiguous id, matches: {}", ids.join(", ")),
+            OpenError::Job(p) => write!(f, "a job, not a session: {}", p.display()),
         }
     }
 }
@@ -509,6 +517,7 @@ pub fn open(target: &Target, only: Option<Provider>) -> Result<Session, OpenErro
                 .ok_or_else(|| OpenError::NotFound(target.clone()))?
                 .root
         }
+        Target::Job(path) => return Err(OpenError::Job(path.clone())),
     };
     expand(file)
 }
@@ -536,7 +545,7 @@ fn expand(file: SessionFile) -> Result<Session, OpenError> {
 }
 
 /// The first non-blank line of a file, for [`provider_of`].
-fn read_head(path: &Path) -> Option<String> {
+pub(crate) fn read_head(path: &Path) -> Option<String> {
     use std::io::{BufRead, BufReader};
     let file = std::fs::File::open(path).ok()?;
     let mut reader = BufReader::new(file);

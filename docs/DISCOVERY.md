@@ -160,6 +160,7 @@ What used to be five feeder sites naming `claude::` are these calls. The live ta
 | `zoe <dir>` | `open(Here(dir))`: the same for another project. |
 | `zoe --provider codex ...` | Forces the provider for a path when `provider_of` cannot tell, or restricts an id or directory lookup to one provider. Never the default route. |
 | `zoe inspect <file>` | `open(Path)` rendered as text. |
+| `zoe <job.jsonl>` | `Target::Job`: a file whose first line is a job header. The core reads it (§8); `open` refuses it. |
 
 Later, with the rail: `zoe sessions` as `sweep` rendered as a table.
 
@@ -176,3 +177,25 @@ The agents whose storage we know fall into three classes:
 Aider keeps many sessions in one markdown file per project and fits none of the above. Not designed for.
 
 The abstraction here is over **feeders**, not over agents. The parts shared are the tailer loop, `assemble`, id lookup, rescan diffing and the rail; the parts that differ per agent, the primitives, are not shared and were never going to be. So the test for any future "agent X needs a primitive changed" is: does a feeder actually behave differently for X? If not, the primitive was wrong and should change. If it does, X is a new class and gets a sibling, not a wider interface.
+
+---
+
+## 8. Jobs: several sessions as one tree
+
+An orchestrator that runs agents one after another, each its own CLI process and its own session (an explorer, a planner, an implementer, a reviewer, any provider), writes a **manifest** naming them. `zoe <manifest>` draws the job as the root, each session under it, and everything a session spawned below that. The code is `src/job.rs` (portable: the format and the rewrite) and `src/tailer/job.rs` (native: the feeder).
+
+The manifest is append-only JSONL, so a job is followed like a transcript. The first line is the header; every other line names a member:
+
+```json
+{"zoe":"job","v":1,"id":"auth-fix","title":"Fix token refresh","task":"Fix the token refresh race","cwd":"/src/app","ts":"2026-10-06T09:00:00Z"}
+{"member":"plan","label":"plan: Opus (claude)","task":"Plan the fix","provider":"claude","session":"6f1c2a9e-…","ts":"2026-10-06T09:00:02Z"}
+{"member":"review","label":"review: Sol (codex)","provider":"codex","path":"/home/me/.codex/sessions/2026/10/06/rollout-….jsonl"}
+```
+
+- A member names its session by `path` (any file of it, relative to the manifest's directory) or `session` id, or both; the path wins. `provider` is optional but saves the read, and is needed while the file is still empty, since Claude's layout claims any `.jsonl`. The key is `[A-Za-z0-9_.-]+` and never `main`. Unknown keys and unreadable lines are skipped. The header must be written first: a manifest is told apart from a transcript by its first line.
+- **A manifest is not a session.** No provider reads it and `open` refuses it. The feeder opens each member with `open`, so a member's subagents and workflows are found by its own provider's `rescan`, exactly as for that session alone.
+- **One rewrite** (`Member::rewrite`, exhaustive over `FactKind`) puts each member in its own namespace: its root `main` becomes the member's key, any other agent `key/id`, every call `key/call`. The member's root is born a subagent of the job's root (a `claude -p` or `codex exec` run is a batch process: running while active, done when quiet), identically from the manifest line and from the session's own first record, so either may come first. A group a member's child names is stated under the member, since a group born from its first child otherwise hangs under the root. A member's title and session rows are kept under its key, so the job's own stay put; its root's prompts are also the job's chapters.
+- The same key naming the same session again (a resumed step) changes nothing; a new session under a used key joins as `key~2`; a session another key already claimed is ignored.
+- A truncated manifest or member file re-attaches the whole job, as a truncated session file re-attaches the session. Replay reads everything up front and keeps tailing, as a session's replay does.
+
+Two rules in the model make this order-independent and are not job-specific: a group placeholder that later speaks for itself takes the kind it states (a Codex thread read after its child is the other case), and the prompt spine is kept in time order rather than arrival order (one file's arrival order already is; several files' is not).

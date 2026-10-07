@@ -28,6 +28,7 @@
 //! behind the `native` feature.
 
 pub mod fact;
+pub mod job;
 pub mod provider;
 pub mod state;
 pub mod tailer;

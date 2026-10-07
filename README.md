@@ -111,12 +111,19 @@ zoe <file.jsonl> --follow    # open a recording at its live edge
 zoe <file.jsonl> --speed N   # playback speed (default 8.0)
 zoe --provider codex ...     # force the format instead of detecting it from the file
 zoe inspect <file|id>        # print the session tree and exit (no TUI)
+zoe <job.jsonl>              # a job: several sessions, any provider, as one tree
 ```
 
 Give it a file and it reads the whole transcript, then keeps watching for new lines.
 Give it a directory, or no argument at all, and it finds the newest session in that
 project and follows it live. Whichever way you start, the controls are the same:
 scrub, follow, pause, jump back to live.
+
+An orchestrator that runs several agents for one task, Claude and Codex alike, can
+write a job manifest naming their sessions, and `zoe` shows them as one tree: the
+job at the root, each session under it with everything it spawned. New members
+appear as their lines are written. The format is in
+[docs/DISCOVERY.md §8](docs/DISCOVERY.md#8-jobs-several-sessions-as-one-tree).
 
 The same engine also runs [in the browser](https://zoetrope.furkankly.dev/app),
 compiled to WebAssembly via [ratzilla](https://github.com/ratatui/ratzilla). Open a
