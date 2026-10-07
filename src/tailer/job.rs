@@ -1,20 +1,22 @@
-//! Tailing a job (native): a manifest naming sessions, read as one tree.
+//! Tailing a job (native): several sessions read as one tree.
 //!
-//! The manifest is tailed like any file. Each member line names a session,
-//! which is opened by its own provider and read by an ordinary
-//! [`LiveSession`], so a member's subagents and workflows are found exactly as
-//! they are for that session alone. What the members state goes through
-//! [`Member::rewrite`] into the job's namespace, and every tick's statements
-//! go out as one batch stamped with the job's id.
+//! A job's members come from a manifest naming them, tailed like any file, or
+//! from a folder: every session that ran under it, found as they appear (an
+//! [`Overview`]). Each member is opened by its own provider and read by an
+//! ordinary [`LiveSession`], so its subagents and workflows are found exactly
+//! as they are for that session alone. What the members state goes through
+//! [`Member::rewrite`] into the job's namespace, and every tick's statements go
+//! out as one batch stamped with the job's id.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::mpsc;
 
 use crate::fact::Statement;
-use crate::job::{self, Entry, Line, Member};
-use crate::provider::{Provider, Target, open};
+use crate::job::{self, Entry, Line, Member, Overview};
+use crate::provider::{Provider, Scope, Session, Target, open, sweep};
 
 use super::bytes::{ReadResult, TailState, read_appended};
 use super::item::ReplayItem;
@@ -22,19 +24,33 @@ use super::live::{Feed, LiveSession, read_session, tail_loop};
 use super::replay::settle;
 use super::{Flow, TailRequest, UiEvent};
 
-/// Retry a member named only by session id every N ticks (~2s at the 200ms
-/// poll): finding an id sweeps every provider's sessions.
-const ID_RETRY_EVERY: u32 = 10;
+/// Look up what is not in the tree yet every N ticks (~2s at the 200ms poll):
+/// a member named only by session id, or an overview's new sessions. Either
+/// sweeps every provider's sessions.
+const LOOKUP_EVERY: u32 = 10;
+
+/// How far back an overview looks when it opens. Sessions that start later
+/// join as they appear, and a session in the tree stays.
+const OVERVIEW_LOOKBACK: Duration = Duration::from_secs(60 * 60);
+
+/// Where a job's members come from.
+enum Source {
+    Manifest {
+        path: PathBuf,
+        state: TailState,
+        /// Member lines whose session cannot be opened yet: a file not
+        /// written yet, or an id no provider lists yet.
+        pending: Vec<Entry>,
+    },
+    Folder(Folder),
+}
 
 /// Everything one job's poll loop owns.
 pub(crate) struct JobFeed {
-    manifest: PathBuf,
-    state: TailState,
-    /// Whether the header has been stated. A later header line is ignored.
+    source: Source,
+    /// Whether the root has been stated: a manifest's header, or the folder.
+    /// A later header line is ignored.
     announced: bool,
-    /// Member lines whose session cannot be opened yet: a file not written
-    /// yet, or an id no provider lists yet.
-    pending: Vec<Entry>,
     members: Vec<(Member, LiveSession)>,
     /// Sessions already in the tree, by provider and id, so a line naming one
     /// again (a resumed step) changes nothing.
@@ -46,11 +62,29 @@ pub(crate) struct JobFeed {
 
 impl JobFeed {
     pub(crate) fn new(manifest: PathBuf) -> Self {
-        JobFeed {
-            manifest,
+        Self::with(Source::Manifest {
+            path: manifest,
             state: TailState::default(),
-            announced: false,
             pending: Vec::new(),
+        })
+    }
+
+    /// An overview of every session under `folder`.
+    pub(crate) fn overview(folder: PathBuf) -> Self {
+        Self::with(Source::Folder(Folder {
+            path: folder,
+            since: SystemTime::now()
+                .checked_sub(OVERVIEW_LOOKBACK)
+                .unwrap_or(SystemTime::UNIX_EPOCH),
+            placed: HashSet::new(),
+            groups: HashSet::new(),
+        }))
+    }
+
+    fn with(source: Source) -> Self {
+        JobFeed {
+            source,
+            announced: false,
             members: Vec::new(),
             claimed: HashSet::new(),
             per_key: HashMap::new(),
@@ -58,34 +92,66 @@ impl JobFeed {
         }
     }
 
-    /// Read what the manifest and every member gained since the last call.
+    /// What re-attaches this job from scratch.
+    fn target(&self) -> Target {
+        match &self.source {
+            Source::Manifest { path, .. } => Target::Job(path.clone()),
+            Source::Folder(folder) => Target::Overview(folder.path.clone()),
+        }
+    }
+
+    /// Read what the source and every member gained since the last call.
     /// Returns `true` if any file was truncated or rotated: the job must be
     /// re-attached, as a session would be.
     pub(crate) fn read(&mut self, out: &mut Vec<Statement>) -> bool {
-        match read_appended(&self.manifest, &mut self.state) {
-            ReadResult::Reset => return true,
-            ReadResult::Lines(lines) => {
-                for line in lines.iter().filter_map(|l| job::parse_line(l)) {
-                    match line {
-                        Line::Header(header) if !self.announced => {
-                            self.announced = true;
-                            out.extend(job::header_statements(&header, &self.manifest));
-                        }
-                        Line::Header(_) => {}
-                        Line::Member(entry) => self.pending.push(entry),
-                    }
-                }
-            }
-            ReadResult::NoChange | ReadResult::Missing => {}
-        }
-
-        let retry_ids = self.ticks.is_multiple_of(ID_RETRY_EVERY);
+        let lookup = self.ticks.is_multiple_of(LOOKUP_EVERY);
         self.ticks = self.ticks.wrapping_add(1);
-        for entry in std::mem::take(&mut self.pending) {
-            match self.resolve(&entry, retry_ids) {
-                Some(session) => self.join(&entry, session, out),
-                None => self.pending.push(entry),
+        let joined = match &mut self.source {
+            Source::Manifest {
+                path,
+                state,
+                pending,
+            } => {
+                match read_appended(path, state) {
+                    ReadResult::Reset => return true,
+                    ReadResult::Lines(lines) => {
+                        for line in lines.iter().filter_map(|l| job::parse_line(l)) {
+                            match line {
+                                Line::Header(header) if !self.announced => {
+                                    self.announced = true;
+                                    out.extend(job::header_statements(&header, path));
+                                }
+                                Line::Header(_) => {}
+                                Line::Member(entry) => pending.push(entry),
+                            }
+                        }
+                    }
+                    ReadResult::NoChange | ReadResult::Missing => {}
+                }
+                let mut joined = Vec::new();
+                pending.retain(|entry| match resolve(path, entry, lookup) {
+                    Some(session) => {
+                        joined.push((entry.clone(), session));
+                        false
+                    }
+                    None => true,
+                });
+                joined
             }
+            Source::Folder(folder) => {
+                if !self.announced {
+                    self.announced = true;
+                    out.extend(Overview::statements(&folder.path));
+                }
+                if lookup {
+                    let recent = sweep(&Scope::ALL.since(folder.since), None);
+                    folder.place(recent, &mut self.members, out);
+                }
+                Vec::new()
+            }
+        };
+        for (entry, session) in joined {
+            self.join(&entry, session, out);
         }
 
         let mut said = Vec::new();
@@ -98,22 +164,8 @@ impl JobFeed {
         false
     }
 
-    /// Open the session a member line names, if it can be opened now.
-    fn resolve(&self, entry: &Entry, retry_ids: bool) -> Option<crate::provider::Session> {
-        if let Some(path) = entry.path_from(&self.manifest) {
-            // An empty file is claimed by layout, and Claude's layout claims
-            // any `.jsonl`: without a provider, wait until the content says.
-            if entry.provider.is_none() && std::fs::metadata(&path).is_ok_and(|m| m.len() == 0) {
-                return None;
-            }
-            return open(&Target::Path(path), entry.provider).ok();
-        }
-        let id = entry.session.as_ref().filter(|_| retry_ids)?;
-        open(&Target::Id(id.clone()), entry.provider).ok()
-    }
-
-    /// Add an opened session to the tree, unless it is in it already.
-    fn join(&mut self, entry: &Entry, session: crate::provider::Session, out: &mut Vec<Statement>) {
+    /// Add a session a manifest names to the tree, unless it is in it already.
+    fn join(&mut self, entry: &Entry, session: Session, out: &mut Vec<Statement>) {
         if !self.claimed.insert((session.provider, session.id.clone())) {
             return;
         }
@@ -142,7 +194,7 @@ impl JobFeed {
                     session_id: session_id.to_string(),
                 })
                 .await;
-            return Some(Target::Job(self.manifest.clone()));
+            return Some(self.target());
         }
         if !statements.is_empty() {
             let _ = ui_tx
@@ -153,6 +205,68 @@ impl JobFeed {
                 .await;
         }
         None
+    }
+}
+
+/// Open the session a member line names, if it can be opened now.
+/// `by_id`: also look up a member named only by its session id.
+fn resolve(manifest: &Path, entry: &Entry, by_id: bool) -> Option<Session> {
+    if let Some(path) = entry.path_from(manifest) {
+        // An empty file is claimed by layout, and Claude's layout claims any
+        // `.jsonl`: without a provider, wait until the content says.
+        if entry.provider.is_none() && std::fs::metadata(&path).is_ok_and(|m| m.len() == 0) {
+            return None;
+        }
+        return open(&Target::Path(path), entry.provider).ok();
+    }
+    let id = entry.session.as_ref().filter(|_| by_id)?;
+    open(&Target::Id(id.clone()), entry.provider).ok()
+}
+
+/// An overview's own state: the folder, and what has been placed in it.
+struct Folder {
+    path: PathBuf,
+    /// Sessions last written before this are not looked at.
+    since: SystemTime,
+    /// Sessions already placed, in the tree or not under the folder, so each
+    /// root's head is read once.
+    placed: HashSet<(Provider, String)>,
+    /// Repository groups already stated.
+    groups: HashSet<String>,
+}
+
+impl Folder {
+    /// Place every session not placed yet: under its repository's group if it
+    /// ran under the folder, nowhere otherwise.
+    fn place(
+        &mut self,
+        sessions: impl IntoIterator<Item = Session>,
+        members: &mut Vec<(Member, LiveSession)>,
+        out: &mut Vec<Statement>,
+    ) {
+        for session in sessions {
+            let key = (session.provider, session.id.clone());
+            if self.placed.contains(&key) {
+                continue;
+            }
+            // A root that names no directory yet (just created) is retried.
+            let Some(cwd) = session.provider.cwd(&session.root) else {
+                continue;
+            };
+            self.placed.insert(key);
+            let Some(repository) = Overview::repository(&self.path, &cwd) else {
+                continue;
+            };
+            let (group, statement) = Overview::group(&repository);
+            if self.groups.insert(group.clone()) {
+                out.push(statement);
+            }
+            let provider = session.provider;
+            let root = format!("{}-{}", provider.name(), session.id);
+            let member = Member::found(root, group, provider);
+            out.push(member.birth());
+            members.push((member, LiveSession::new(session, None, Some(provider))));
+        }
     }
 }
 
@@ -215,10 +329,35 @@ pub(crate) async fn run_job(
     tail_loop(Feed::Job(Box::new(feed)), session_id, ui_tx, req_rx).await
 }
 
+/// Follow an overview of `folder` until a switch or exit. Always live: what is
+/// running now is the point, and the first poll backfills the last hour.
+pub(crate) async fn run_overview(
+    folder: &Path,
+    ui_tx: &mpsc::Sender<UiEvent>,
+    req_rx: &mut mpsc::Receiver<TailRequest>,
+) -> Flow {
+    let session_id = Overview::session_id(folder);
+    let _ = ui_tx
+        .send(UiEvent::SessionReset {
+            session_id: session_id.clone(),
+        })
+        .await;
+    let feed = JobFeed::overview(folder.to_path_buf());
+    tail_loop(Feed::Job(Box::new(feed)), session_id, ui_tx, req_rx).await
+}
+
 /// Read a whole job, every member's every file, as the statements its tree is
 /// folded from. `inspect`'s way in.
 pub fn read_job(manifest: &Path) -> Vec<Statement> {
-    let mut feed = JobFeed::new(manifest.to_path_buf());
+    read_all(JobFeed::new(manifest.to_path_buf()))
+}
+
+/// Read an overview of `folder` as it stands: the sessions of the last hour.
+pub fn read_overview(folder: &Path) -> Vec<Statement> {
+    read_all(JobFeed::overview(folder.to_path_buf()))
+}
+
+fn read_all(mut feed: JobFeed) -> Vec<Statement> {
     let mut statements = Vec::new();
     feed.read(&mut statements);
     statements
@@ -357,6 +496,77 @@ mod tests {
         // Truncating a member's file re-attaches the job.
         std::fs::write(&plan, "{}\n").unwrap();
         assert!(feed.read(&mut Vec::new()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_overview_places_sessions_under_their_repositories_once() {
+        let dir = temp_dir("overview");
+        let folder = dir.join("projects");
+        for repo in ["app/.git", "app/src", "site/.git"] {
+            std::fs::create_dir_all(folder.join(repo)).unwrap();
+        }
+        // Claude keeps sessions by project elsewhere; each records where it ran.
+        let session = |uuid: &str, cwd: &Path| {
+            let path = dir.join("claude").join("p").join(format!("{uuid}.jsonl"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let cwd = serde_json::to_string(&cwd.display().to_string()).unwrap();
+            let line = format!(
+                r#"{{"type":"user","uuid":"u1","parentUuid":null,"cwd":{cwd},"timestamp":"2026-10-06T10:00:00.000Z","message":{{"role":"user","content":"fix the login"}}}}"#
+            );
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            open(&Target::Path(path), Some(Provider::Claude)).unwrap()
+        };
+        let sessions = || {
+            vec![
+                session(
+                    "11111111-1111-1111-1111-111111111111",
+                    &folder.join("app/src"),
+                ),
+                session("22222222-2222-2222-2222-222222222222", &folder.join("site")),
+                session(
+                    "33333333-3333-3333-3333-333333333333",
+                    &dir.join("elsewhere"),
+                ),
+            ]
+        };
+
+        let mut feed = JobFeed::overview(folder.clone());
+        let Source::Folder(found) = &mut feed.source else {
+            unreachable!()
+        };
+        let mut out = Overview::statements(&folder);
+        found.place(sessions(), &mut feed.members, &mut out);
+        // Seen again on the next sweep, nothing is placed twice.
+        found.place(sessions(), &mut feed.members, &mut out);
+        assert_eq!(
+            feed.members.len(),
+            2,
+            "the session outside the folder is left out"
+        );
+        assert!(!feed.read(&mut out));
+
+        let model = fold(&out);
+        let app = "claude-11111111-1111-1111-1111-111111111111";
+        assert_eq!(
+            model.agent(app).and_then(|a| a.parent.as_deref()),
+            Some("@app")
+        );
+        assert_eq!(
+            model
+                .agent("@app")
+                .map(|g| (g.kind, g.parent.as_deref(), g.agent_type.as_deref())),
+            Some((AgentKind::Group, Some(MAIN_ID), Some("app")))
+        );
+        assert_eq!(
+            model
+                .agent("claude-22222222-2222-2222-2222-222222222222")
+                .and_then(|a| a.parent.as_deref()),
+            Some("@site")
+        );
+        let node = model.agent(app).unwrap();
+        assert_eq!(node.agent_type.as_deref(), Some("claude"));
+        assert_eq!(node.description.as_deref(), Some("fix the login"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

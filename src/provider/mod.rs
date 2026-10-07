@@ -299,6 +299,9 @@ pub enum Target {
     /// A job manifest: several sessions shown as one tree ([`crate::job`]).
     /// The core reads it; no provider opens it.
     Job(PathBuf),
+    /// Every session that ran under a folder, grouped by repository
+    /// ([`crate::job::Overview`]). Several sessions, never one.
+    Overview(PathBuf),
 }
 
 /// Why [`open`] found nothing.
@@ -311,7 +314,7 @@ pub enum OpenError {
     NotFound(Target),
     /// The id prefix matched more than one session.
     Ambiguous(Vec<String>),
-    /// A job manifest is several sessions, never one.
+    /// A job manifest or an overview is several sessions, never one.
     Job(PathBuf),
 }
 
@@ -322,7 +325,7 @@ impl std::fmt::Display for OpenError {
                 write!(f, "not a transcript any provider reads: {}", p.display())
             }
             OpenError::Orphan(p) => write!(f, "no session found for {}", p.display()),
-            OpenError::NotFound(Target::Path(p) | Target::Job(p)) => {
+            OpenError::NotFound(Target::Path(p) | Target::Job(p) | Target::Overview(p)) => {
                 write!(f, "not found: {}", p.display())
             }
             OpenError::NotFound(Target::Id(id)) => write!(f, "no session with id {id}"),
@@ -330,7 +333,7 @@ impl std::fmt::Display for OpenError {
                 write!(f, "no session for {}", cwd.display())
             }
             OpenError::Ambiguous(ids) => write!(f, "ambiguous id, matches: {}", ids.join(", ")),
-            OpenError::Job(p) => write!(f, "a job, not a session: {}", p.display()),
+            OpenError::Job(p) => write!(f, "several sessions, not one: {}", p.display()),
         }
     }
 }
@@ -374,6 +377,20 @@ impl Provider {
         match self {
             Provider::Claude => claude::discovery::project_key(cwd),
             Provider::Codex => codex::discovery::project_key(cwd),
+        }
+    }
+
+    /// The directory a session ran in, read off its root file, when the
+    /// format records it. Unlike the opaque [`project_key`](Self::project_key),
+    /// a path the core can place: which folder, which repository.
+    pub fn cwd(self, root: &SessionFile) -> Option<PathBuf> {
+        match self {
+            Provider::Claude => claude::discovery::cwd(root),
+            // A Codex project key is the path itself, from the root's own
+            // `session_meta`.
+            Provider::Codex => {
+                Some(PathBuf::from(&root.project_key)).filter(|p| !p.as_os_str().is_empty())
+            }
         }
     }
 
@@ -517,7 +534,7 @@ pub fn open(target: &Target, only: Option<Provider>) -> Result<Session, OpenErro
                 .ok_or_else(|| OpenError::NotFound(target.clone()))?
                 .root
         }
-        Target::Job(path) => return Err(OpenError::Job(path.clone())),
+        Target::Job(path) | Target::Overview(path) => return Err(OpenError::Job(path.clone())),
     };
     expand(file)
 }
