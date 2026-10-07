@@ -45,7 +45,8 @@ pub fn new_flow() -> AgentFlow {
 /// the canvas no further, and zooming in past it stays the user's to do.
 const FIT_ZOOM: f64 = 1.0;
 
-/// Frame every card (deferred to the next render), no larger than [`FIT_ZOOM`].
+/// Frame every card (deferred to the next render), no larger than their own
+/// size (`FIT_ZOOM`).
 pub fn fit(flow: &mut AgentFlow) {
     flow.request_fit_view_with_options(rataflow::FitViewOptions::default().with_max_zoom(FIT_ZOOM));
 }

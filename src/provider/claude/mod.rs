@@ -257,6 +257,9 @@ pub fn facts(source: &Source, entry: &Entry) -> Vec<Fact> {
                         _ => {}
                     }
                 }
+                if msg.stop_reason.as_deref() == Some("end_turn") {
+                    out.push(about(FactKind::Waiting));
+                }
             }
             ensure_activity(&mut out, &owner, ts);
         }

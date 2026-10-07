@@ -260,6 +260,10 @@ pub struct AgentInfo {
     pub said: Option<Said>,
     pub first_ts: Option<DateTime<Utc>>,
     pub last_ts: Option<DateTime<Utc>>,
+    /// When its turn last ended, and when it was last prompted or worked: it
+    /// waits while the first is the later (see [`waiting`](Self::waiting)).
+    waited: Option<DateTime<Utc>>,
+    worked: Option<DateTime<Utc>>,
     /// `requestId`s whose usage has already been counted. Claude Code splits one
     /// logical assistant turn across several JSONL lines that each repeat the
     /// same cumulative `usage.output_tokens`; summing per line inflates the
@@ -274,6 +278,12 @@ impl AgentInfo {
     /// [`SessionModel::spawn_order`] for why this is an iterator.
     pub fn tool_calls(&self) -> impl ExactSizeIterator<Item = &ToolCallInfo> {
         self.tool_calls.iter()
+    }
+
+    /// Whether its turn has ended and nothing has started it again.
+    pub fn waiting(&self) -> bool {
+        self.waited
+            .is_some_and(|ended| self.worked.is_none_or(|worked| ended >= worked))
     }
 
     /// A fresh agent record of the given kind, defaulting to
@@ -295,6 +305,8 @@ impl AgentInfo {
             said: None,
             first_ts: None,
             last_ts: None,
+            waited: None,
+            worked: None,
             seen_dedup_keys: HashSet::new(),
         }
     }
@@ -502,8 +514,22 @@ impl SessionModel {
                 text: text.clone(),
             });
         }
+        // A turn's end, and what starts the agent again: kept as the latest of
+        // each, so the fold stays order-independent.
+        if let (Some(ts), Some(a)) = (fact.ts, self.agents.get_mut(id)) {
+            match fact.kind {
+                FactKind::Waiting => a.waited = a.waited.max(Some(ts)),
+                FactKind::Prompt(_)
+                | FactKind::Told(_)
+                | FactKind::Message(_)
+                | FactKind::Reasoning(_)
+                | FactKind::ToolStart { .. } => a.worked = a.worked.max(Some(ts)),
+                _ => {}
+            }
+        }
         match &fact.kind {
             FactKind::Activity
+            | FactKind::Waiting
             | FactKind::Session { .. }
             | FactKind::Tally(_)
             | FactKind::Title(_) => {}
@@ -849,11 +875,13 @@ impl SessionModel {
                 // quiet and settles to Done/Idle mid-tool, then snaps back when
                 // the result lands. A reliably-terminal agent short-circuits
                 // below, so this can't revive a genuinely finished one.
-                let active = (reference - ts).num_seconds() <= INTERACTIVE_IDLE_SECS
-                    || agent
-                        .tool_calls
-                        .iter()
-                        .any(|c| c.state == ToolState::Pending);
+                // An ended turn is idle at once, however recent its last record.
+                let active = !agent.waiting()
+                    && ((reference - ts).num_seconds() <= INTERACTIVE_IDLE_SECS
+                        || agent
+                            .tool_calls
+                            .iter()
+                            .any(|c| c.state == ToolState::Pending));
                 let next = if agent.is_interactive() {
                     if active {
                         AgentStatus::Running
@@ -1197,6 +1225,32 @@ mod tests {
         assert_eq!(f.kind, LogKind::Failure);
         assert_eq!(f.text, "Bash failed · cargo test");
         assert_eq!(f.ts, ts("2026-06-05T10:12:00Z"));
+    }
+
+    /// A turn that ended is idle at once, not after a quiet spell; a prompt
+    /// starts it again.
+    #[test]
+    fn an_ended_turn_is_idle_until_the_agent_is_prompted() {
+        let ts = |s: &str| s.parse::<DateTime<Utc>>().ok();
+        let mut m = SessionModel::new("s".into());
+        let by = |kind, t: &str| Fact {
+            agent: Some(MAIN_ID.to_string()),
+            ts: ts(t),
+            kind,
+        };
+        m.apply_fact(&by(FactKind::Prompt("go".into()), "2026-06-05T10:00:00Z"));
+        m.apply_fact(&by(
+            FactKind::Message("Done.".into()),
+            "2026-06-05T10:01:00Z",
+        ));
+        m.recompute_liveness(ts("2026-06-05T10:01:05Z"));
+        assert_eq!(m.agent(MAIN_ID).unwrap().status, AgentStatus::Running);
+        m.apply_fact(&by(FactKind::Waiting, "2026-06-05T10:01:00Z"));
+        m.recompute_liveness(ts("2026-06-05T10:01:05Z"));
+        assert_eq!(m.agent(MAIN_ID).unwrap().status, AgentStatus::Idle);
+        m.apply_fact(&by(FactKind::Prompt("more".into()), "2026-06-05T10:02:00Z"));
+        m.recompute_liveness(ts("2026-06-05T10:02:05Z"));
+        assert_eq!(m.agent(MAIN_ID).unwrap().status, AgentStatus::Running);
     }
 
     #[test]
