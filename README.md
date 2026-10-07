@@ -112,7 +112,6 @@ zoe <file.jsonl> --speed N   # playback speed (default 8.0)
 zoe --provider codex ...     # force the format instead of detecting it from the file
 zoe inspect <file|id>        # print the session tree and exit (no TUI)
 zoe <job.jsonl>              # a job: several sessions, any provider, as one tree
-zoe --all [dir]              # every agent under a folder, live, grouped by repository
 ```
 
 Give it a file and it reads the whole transcript, then keeps watching for new lines.

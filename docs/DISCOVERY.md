@@ -161,7 +161,6 @@ What used to be five feeder sites naming `claude::` are these calls. The live ta
 | `zoe --provider codex ...` | Forces the provider for a path when `provider_of` cannot tell, or restricts an id or directory lookup to one provider. Never the default route. |
 | `zoe inspect <file>` | `open(Path)` rendered as text. |
 | `zoe <job.jsonl>` | `Target::Job`: a file whose first line is a job header. The core reads it (§8); `open` refuses it. |
-| `zoe --all [dir]` | `Target::Overview`: every session under the folder (§8), live. `zoe inspect --all [dir]` prints it. |
 
 Later, with the rail: `zoe sessions` as `sweep` rendered as a table.
 
@@ -198,7 +197,5 @@ The manifest is append-only JSONL, so a job is followed like a transcript. The f
 - **One rewrite** (`Member::rewrite`, exhaustive over `FactKind`) puts each member in its own namespace: its root `main` becomes the member's key, any other agent `key/id`, every call `key/call`. The member's root is born a subagent of the job's root (a `claude -p` or `codex exec` run is a batch process: running while active, done when quiet), identically from the manifest line and from the session's own first record, so either may come first. A group a member's child names is stated under the member, since a group born from its first child otherwise hangs under the root. A member's title and session rows are kept under its key, so the job's own stay put; its root's prompts are also the job's chapters.
 - The same key naming the same session again (a resumed step) changes nothing; a new session under a used key joins as `key~2`; a session another key already claimed is ignored.
 - A truncated manifest or member file re-attaches the whole job, as a truncated session file re-attaches the session. Replay reads everything up front and keeps tailing, as a session's replay does.
-
-**An overview** (`zoe --all <folder>`) is a job whose members are found rather than named: every few seconds a `sweep` of the last hour's sessions, of every provider, is placed by where each ran. `Provider::cwd` answers that from the root file (Claude records `cwd` on its entries, Codex's project key is the path), since a sanitized project key cannot be turned back into a path. The core then groups by repository: the nearest folder holding a `.git` (a repository or a worktree), else the first folder below the root. Each repository is a group under the folder's root, so its status rolls up from its sessions. A found member is named by its session's title when the format records one (a title is an agent's own statement, so it outranks the provider's name, which is only a label) and described by its first prompt; its session rows are left out. A session is placed once, and stays.
 
 Two rules in the model make this order-independent and are not job-specific: a group placeholder that later speaks for itself takes the kind it states (a Codex thread read after its child is the other case), and the prompt spine is kept in time order rather than arrival order (one file's arrival order already is; several files' is not).

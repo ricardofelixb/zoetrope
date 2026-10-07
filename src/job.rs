@@ -196,155 +196,19 @@ pub fn header_statements(header: &Header, manifest: &Path) -> Vec<Statement> {
     ]
 }
 
-/// An overview: every session that ran under a folder, found as they appear
-/// rather than named by a manifest, and grouped by the repository each ran in.
-/// The folder is the root; each repository is a group under it, so its status
-/// rolls up from its sessions.
-pub struct Overview;
-
-impl Overview {
-    /// The id an overview's model and events are stamped with.
-    pub fn session_id(folder: &Path) -> String {
-        format!("folder:{}", folder.display())
-    }
-
-    /// The folder as the root agent, and its name as the title.
-    pub fn statements(folder: &Path) -> Vec<Statement> {
-        let name = folder_name(folder);
-        let root = Fact {
-            agent: Some(MAIN_ID.into()),
-            ts: None,
-            kind: FactKind::Agent {
-                kind: AgentKind::Main,
-                parent: None,
-                agent_type: Some("overview".into()),
-                description: Some(folder.display().to_string()),
-                spawned_by: None,
-                interactive: true,
-            },
-        };
-        let meta = |kind| Fact {
-            agent: None,
-            ts: None,
-            kind,
-        };
-        vec![
-            root.into(),
-            Statement {
-                at: None,
-                facts: vec![
-                    meta(FactKind::Title(name)),
-                    meta(FactKind::Session {
-                        label: "folder".into(),
-                        value: folder.display().to_string(),
-                    }),
-                ],
-            },
-        ]
-    }
-
-    /// Which repository under `folder` a session that ran in `cwd` belongs to,
-    /// as the group it hangs under: the nearest folder holding a `.git` (a
-    /// repository or a worktree), else the first folder below `folder`.
-    /// `None` when `cwd` is not under `folder` at all.
-    pub fn repository(folder: &Path, cwd: &Path) -> Option<String> {
-        let below = relative(folder, cwd)?;
-        let repository = cwd
-            .ancestors()
-            .take_while(|dir| relative(folder, dir).is_some())
-            .find(|dir| dir.join(".git").exists())
-            .and_then(|dir| relative(folder, dir));
-        let name = match repository {
-            Some(rel) => rel,
-            None => below
-                .components()
-                .next()
-                .map(|c| PathBuf::from(c.as_os_str()))
-                .unwrap_or_default(),
-        };
-        let name = name.to_string_lossy().replace('\\', "/");
-        Some(if name.is_empty() {
-            folder_name(folder)
-        } else {
-            name
-        })
-    }
-
-    /// A repository's group: born under the root, named after the repository.
-    pub fn group(name: &str) -> (AgentId, Statement) {
-        let id = format!("@{name}");
-        let facts = vec![
-            Fact {
-                agent: Some(id.clone()),
-                ts: None,
-                kind: FactKind::Agent {
-                    kind: AgentKind::Group,
-                    parent: Some(MAIN_ID.into()),
-                    agent_type: None,
-                    description: None,
-                    spawned_by: None,
-                    interactive: false,
-                },
-            },
-            Fact {
-                agent: Some(id.clone()),
-                ts: None,
-                kind: FactKind::Label {
-                    agent_type: Some(name.into()),
-                    description: None,
-                },
-            },
-        ];
-        (id, Statement { at: None, facts })
-    }
-}
-
-fn folder_name(folder: &Path) -> String {
-    folder.file_name().map_or_else(
-        || folder.display().to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    )
-}
-
-/// `path` below `folder`, or `None` when it is not under it. Windows paths
-/// compare without case, as the filesystem does.
-fn relative(folder: &Path, path: &Path) -> Option<PathBuf> {
-    if let Ok(rel) = path.strip_prefix(folder) {
-        return Some(rel.to_path_buf());
-    }
-    if !cfg!(windows) {
-        return None;
-    }
-    let norm = |p: &Path| {
-        p.to_string_lossy()
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_lowercase()
-    };
-    let (f, p) = (norm(folder), norm(path));
-    let rest = p.strip_prefix(&f)?;
-    (rest.is_empty() || rest.starts_with('\\'))
-        .then(|| PathBuf::from(rest.trim_start_matches('\\')))
-}
-
 /// One session of a job, and how its facts are renamed into the job's tree.
 ///
 /// The member's root becomes `root` (its key, or `key~2` for a second session
 /// under the same key), any other agent `root/id`, and every call `root/call`,
 /// so neither agent nor call ids collide between members. The root is born as
-/// a subagent of the job's root (or of a group under it): a `claude -p` or
-/// `codex exec` run is a batch process, so it is running while active and
-/// done when it goes quiet.
+/// a subagent of the job's root: a `claude -p` or `codex exec` run is a batch
+/// process, so it is running while active and done when it goes quiet.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Member {
     pub root: AgentId,
-    parent: AgentId,
     label: String,
     task: Option<String>,
     ts: Option<DateTime<Utc>>,
-    /// Found under a folder rather than named by a manifest, so nobody named
-    /// or described it: its session does (see [`Member::found`]).
-    found: bool,
 }
 
 impl Member {
@@ -352,64 +216,29 @@ impl Member {
         Member {
             label: entry.label.clone().unwrap_or_else(|| root.clone()),
             root,
-            parent: MAIN_ID.into(),
             task: entry.task.clone(),
             ts: entry.ts,
-            found: false,
         }
     }
 
-    /// A session found under a folder rather than named by a manifest
-    /// ([`Overview`]): hung under its repository's group, named by its title
-    /// if its format records one and by its provider otherwise, and described
-    /// by what it was first asked. Its session rows are left out: an overview
-    /// of many sessions is not about any one's mode or version.
-    pub fn found(root: AgentId, group: AgentId, provider: crate::provider::Provider) -> Self {
-        Member {
-            root,
-            parent: group,
-            label: provider.name().into(),
-            task: None,
-            ts: None,
-            found: true,
-        }
-    }
-
-    /// The member's node, stated when its manifest line is read (or its
-    /// session is found), before its session has said anything.
+    /// The member's node, stated when its manifest line is read, before its
+    /// session has said anything.
     pub fn birth(&self) -> Statement {
-        let mut facts = vec![Fact {
+        Fact {
             agent: Some(self.root.clone()),
             ts: self.ts,
-            kind: self.birth_kind(None),
-        }];
-        // A label only names an unnamed node, so the session's own title, an
-        // agent's statement, wins in either order.
-        if self.found {
-            facts.push(Fact {
-                agent: Some(self.root.clone()),
-                ts: self.ts,
-                kind: FactKind::Label {
-                    agent_type: Some(self.label.clone()),
-                    description: None,
-                },
-            });
+            kind: self.birth_kind(),
         }
-        Statement { at: self.ts, facts }
+        .into()
     }
 
     /// Identical wherever it is stated (the manifest line and the session's own
-    /// root birth), so the two fold to the same node in either order. A found
-    /// member's name comes from `title`, when its session states one.
-    fn birth_kind(&self, title: Option<String>) -> FactKind {
+    /// root birth), so the two fold to the same node in either order.
+    fn birth_kind(&self) -> FactKind {
         FactKind::Agent {
             kind: AgentKind::Subagent,
-            parent: Some(self.parent.clone()),
-            agent_type: if self.found {
-                title
-            } else {
-                Some(self.label.clone())
-            },
+            parent: Some(MAIN_ID.into()),
+            agent_type: Some(self.label.clone()),
             description: self.task.clone(),
             spawned_by: None,
             interactive: false,
@@ -440,7 +269,7 @@ impl Member {
                 FactKind::Agent {
                     kind: AgentKind::Main,
                     ..
-                } => self.birth_kind(None),
+                } => self.birth_kind(),
                 FactKind::Agent {
                     kind,
                     parent,
@@ -510,30 +339,8 @@ impl Member {
                         ts,
                         kind: FactKind::Prompt(text.clone()),
                     });
-                    // A description only fills an empty one, so the first
-                    // prompt describes the member.
-                    if self.found {
-                        facts.push(Fact {
-                            agent: agent.clone(),
-                            ts,
-                            kind: FactKind::Label {
-                                agent_type: None,
-                                description: Some(text.clone()),
-                            },
-                        });
-                    }
                     FactKind::Prompt(text)
                 }
-                // A found member is named by its title.
-                FactKind::Title(title) if self.found => {
-                    facts.push(Fact {
-                        agent: Some(self.root.clone()),
-                        ts,
-                        kind: self.birth_kind(Some(title)),
-                    });
-                    continue;
-                }
-                FactKind::Session { .. } if self.found => continue,
                 // Session metadata is the job's: a member's is kept, under the
                 // member's name, so the job's own title and rows stay put.
                 FactKind::Title(title) => FactKind::Session {
@@ -841,86 +648,5 @@ mod tests {
         ));
         assert!(matches!(&st[0].facts[1].kind, FactKind::Prompt(t) if t == "fix the bug"));
         assert!(st[1].is_session_meta());
-    }
-
-    #[test]
-    fn a_session_hangs_under_the_repository_it_ran_in() {
-        let folder = std::env::temp_dir().join(format!("zoetrope_overview_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&folder);
-        for dir in ["app/.git", "app/src/deep", "tools/cli/.git", "notes/drafts"] {
-            std::fs::create_dir_all(folder.join(dir)).unwrap();
-        }
-        let at = |rel: &str| Overview::repository(&folder, &folder.join(rel));
-        assert_eq!(at("app/src/deep").as_deref(), Some("app"));
-        assert_eq!(at("app").as_deref(), Some("app"));
-        assert_eq!(
-            at("tools/cli").as_deref(),
-            Some("tools/cli"),
-            "a nested repository"
-        );
-        assert_eq!(
-            at("notes/drafts").as_deref(),
-            Some("notes"),
-            "no repository: the first folder"
-        );
-        let name = folder.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(at("").as_deref(), Some(name.as_str()), "the folder itself");
-        assert!(Overview::repository(&folder, &std::env::temp_dir()).is_none());
-        if cfg!(windows) {
-            let upper = PathBuf::from(folder.to_string_lossy().to_uppercase()).join("app");
-            assert_eq!(
-                Overview::repository(&folder, &upper).as_deref(),
-                Some("app")
-            );
-        }
-        let _ = std::fs::remove_dir_all(&folder);
-    }
-
-    #[test]
-    fn a_found_session_is_named_by_its_title_else_its_provider() {
-        let m = Member::found("claude-s1".into(), "@app".into(), Provider::Claude);
-        let birth = m.birth().facts;
-        let titled = rewrite(
-            &m,
-            vec![
-                Fact {
-                    agent: None,
-                    ts: None,
-                    kind: FactKind::Title("Fix the login".into()),
-                },
-                Fact {
-                    agent: None,
-                    ts: None,
-                    kind: FactKind::Session {
-                        label: "mode".into(),
-                        value: "normal".into(),
-                    },
-                },
-                fact(MAIN_ID, FactKind::Prompt("the login is broken".into())),
-            ],
-        );
-        assert!(
-            titled.iter().all(|f| !f.is_session_meta()),
-            "no session rows"
-        );
-        for facts in [
-            [&birth[..], &titled[..]].concat(),
-            [&titled[..], &birth[..]].concat(),
-        ] {
-            let mut model = crate::state::session::SessionModel::new("o".into());
-            for f in &facts {
-                model.apply_fact(f);
-            }
-            let node = model.agent("claude-s1").unwrap();
-            assert_eq!(node.agent_type.as_deref(), Some("Fix the login"));
-            assert_eq!(node.description.as_deref(), Some("the login is broken"));
-            assert_eq!(node.parent.as_deref(), Some("@app"));
-        }
-        let mut model = crate::state::session::SessionModel::new("o".into());
-        for f in &birth {
-            model.apply_fact(f);
-        }
-        let untitled = model.agent("claude-s1").unwrap();
-        assert_eq!(untitled.agent_type.as_deref(), Some("claude"));
     }
 }
