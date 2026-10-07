@@ -5,7 +5,7 @@
 //!
 //! Kept per view, keyed by the session or job watched, in one small file under
 //! the user's cache (`~/.cache/zoetrope/views.json`), the oldest dropped past
-//! [`KEEP`].
+//! `KEEP`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

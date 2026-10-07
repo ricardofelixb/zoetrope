@@ -765,7 +765,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(app.draft.is_none(), "no agent, no message");
         app.draft = Some(crate::state::Draft::default());
-        for c in "hqi".chars() {
+        for c in "hq!".chars() {
             press(&mut app, KeyCode::Char(c));
         }
         assert!(!app.should_quit, "q is a letter while writing");
@@ -773,7 +773,7 @@ mod tests {
         press(&mut app, KeyCode::Backspace);
         handle_event(&Event::Paste("ey\nyou".into()), &mut app);
         let draft = app.draft.clone().unwrap();
-        assert_eq!((draft.text.as_str(), draft.cursor), ("hey youi", 7));
+        assert_eq!((draft.text.as_str(), draft.cursor), ("hey you!", 7));
         press(&mut app, KeyCode::Esc);
         assert!(app.draft.is_none());
     }

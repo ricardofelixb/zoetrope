@@ -65,6 +65,9 @@ pub enum FactKind {
     /// The agent produced a record that says nothing else. Exists so activity
     /// tracking does not depend on which other facts a line happened to yield.
     Activity,
+    /// The agent's turn ended: it waits for input, idle however recent its
+    /// last record, until it is prompted or works again.
+    Waiting,
     /// Naming for an agent that may not exist yet. Decorates, never creates:
     /// a group is born from its first child, not from the record that names it.
     Label {
@@ -163,6 +166,7 @@ impl FactKind {
         match self {
             FactKind::Agent { .. } => "Agent",
             FactKind::Activity => "Activity",
+            FactKind::Waiting => "Waiting",
             FactKind::Label { .. } => "Label",
             FactKind::Model(_) => "Model",
             FactKind::Tokens { .. } => "Tokens",

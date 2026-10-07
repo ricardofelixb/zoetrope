@@ -270,10 +270,10 @@ impl Stream {
                             out.push(by(FactKind::Model(model)));
                         }
                     }
-                    EventMsg::TaskStarted { .. }
-                    | EventMsg::TaskComplete { .. }
-                    | EventMsg::TurnAborted
-                    | EventMsg::Other => {}
+                    EventMsg::TaskComplete { .. } | EventMsg::TurnAborted => {
+                        out.push(by(FactKind::Waiting));
+                    }
+                    EventMsg::TaskStarted { .. } | EventMsg::Other => {}
                 }
                 ensure_activity(&mut out, owner);
             }

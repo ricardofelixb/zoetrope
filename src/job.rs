@@ -394,6 +394,7 @@ impl Member {
                     value,
                 },
                 kind @ (FactKind::Activity
+                | FactKind::Waiting
                 | FactKind::Label { .. }
                 | FactKind::Model(_)
                 | FactKind::Tokens { .. }
