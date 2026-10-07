@@ -544,6 +544,15 @@ fn expand(file: SessionFile) -> Result<Session, OpenError> {
         .ok_or(OpenError::Orphan(file.path.clone()))
 }
 
+/// The user's home directory: the system's answer (`USERPROFILE` on Windows,
+/// where a shell such as PowerShell sets no `HOME`), else `$HOME`.
+pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
+    #[allow(deprecated)]
+    std::env::home_dir()
+        .filter(|h| !h.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+}
+
 /// The first non-blank line of a file, for [`provider_of`].
 pub(crate) fn read_head(path: &Path) -> Option<String> {
     use std::io::{BufRead, BufReader};

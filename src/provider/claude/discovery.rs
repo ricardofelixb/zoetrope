@@ -26,11 +26,11 @@ pub fn sanitize_cwd(cwd: &std::path::Path) -> String {
 
 /// The `~/.claude/projects` root, if a home directory can be resolved.
 fn claude_projects_root() -> Option<std::path::PathBuf> {
-    #[allow(deprecated)]
-    let home = std::env::home_dir()
-        .filter(|h| !h.as_os_str().is_empty())
-        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))?;
-    Some(home.join(".claude").join("projects"))
+    Some(
+        crate::provider::home_dir()?
+            .join(".claude")
+            .join("projects"),
+    )
 }
 
 /// Absolute path to the `~/.claude/projects/<sanitized-cwd>` directory for a

@@ -20,8 +20,7 @@ pub fn codex_home() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CODEX_HOME") {
         return Some(PathBuf::from(p));
     }
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".codex"))
+    Some(crate::provider::home_dir()?.join(".codex"))
 }
 
 /// The sessions root under a Codex home.
