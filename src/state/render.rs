@@ -49,7 +49,7 @@ fn tree(model: &SessionModel, parent: Option<&str>, depth: usize, out: &mut Stri
         let Some(agent) = model.agent(id) else {
             continue;
         };
-        if agent.parent.as_deref() != parent {
+        if agent.parent.as_deref() != parent || model.hidden(id) {
             continue;
         }
 

@@ -102,6 +102,9 @@ pub struct Stream {
     /// The main transcript's working directory, stated when it changes: every
     /// line carries it, and the session is resumed from it.
     cwd: Option<String>,
+    /// The text or thinking last written, which a spawn in a following record
+    /// gives as its reason when nothing precedes it in its own.
+    above: Option<String>,
 }
 
 impl Stream {
@@ -111,6 +114,7 @@ impl Stream {
             last_ts: None,
             announced: false,
             cwd: None,
+            above: None,
         }
     }
 
@@ -127,7 +131,7 @@ impl Stream {
         if at.is_some() {
             self.last_ts = at;
         }
-        let mut out = facts(&self.source, entry);
+        let mut out = facts_after(&self.source, entry, &mut self.above);
         if out.is_empty() {
             return None;
         }
@@ -203,7 +207,14 @@ fn entry_cwd(entry: &Entry) -> Option<&str> {
 }
 
 /// Facts stated by one transcript line, given which file it came from.
+#[cfg(test)]
 pub fn facts(source: &Source, entry: &Entry) -> Vec<Fact> {
+    facts_after(source, entry, &mut None)
+}
+
+/// Facts stated by one transcript line, given the text last written before this line, and leaving the
+/// text last written by it.
+fn facts_after(source: &Source, entry: &Entry, carried: &mut Option<String>) -> Vec<Fact> {
     let mut out = Vec::new();
     match entry {
         Entry::Assistant(e) => {
@@ -231,13 +242,32 @@ pub fn facts(source: &Source, entry: &Entry) -> Vec<Fact> {
                     }));
                 }
                 // Blocks in order: a spawn carries the text nearest above it as
-                // its stated reason, which the fold reads off the last Reasoning.
+                // its stated reason, which the merged message below would blur.
+                // A record's text is one message, stated at its first block: its
+                // facts share a time, and nothing orders them but their place.
+                let said = msg
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } if !text.trim().is_empty() => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let mut stated = false;
+                let mut above = carried.clone();
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text } if !text.trim().is_empty() => {
-                            out.push(about(FactKind::Message(text.clone())));
+                            above = Some(text.clone());
+                            if !std::mem::replace(&mut stated, true) {
+                                out.push(about(FactKind::Message(said.clone())));
+                            }
                         }
                         ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
+                            above = Some(thinking.clone());
                             out.push(about(FactKind::Reasoning(thinking.clone())));
                         }
                         ContentBlock::ToolUse(tu) => {
@@ -251,12 +281,16 @@ pub fn facts(source: &Source, entry: &Entry) -> Vec<Fact> {
                                 summary,
                             }));
                             if is_spawn_tool(&name) {
-                                out.push(about(FactKind::Spawn { call: call.clone() }));
+                                out.push(about(FactKind::Spawn {
+                                    call: call.clone(),
+                                    reason: above.clone(),
+                                }));
                             }
                         }
                         _ => {}
                     }
                 }
+                *carried = above;
                 if msg.stop_reason.as_deref() == Some("end_turn") {
                     out.push(about(FactKind::Waiting));
                 }
@@ -571,5 +605,55 @@ mod tests {
             summarize_tool("Bash", &bash, Some("/proj")).as_deref(),
             Some("cargo test")
         );
+    }
+
+    /// A record's text blocks are one message: they share a time, so nothing
+    /// else could order them, even with a thinking block between.
+    #[test]
+    fn adjacent_text_blocks_are_one_message() {
+        let mut stream = Stream::new(Source::Main);
+        let line = r#"{"type":"assistant","uuid":"a","timestamp":"2026-10-06T10:00:00.000Z","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Z progress"},{"type":"thinking","thinking":"hm"},{"type":"text","text":"A final report"}]}}"#;
+        let facts = stream.push(line).unwrap().facts;
+        let said: Vec<&FactKind> = facts
+            .iter()
+            .map(|f| &f.kind)
+            .filter(|k| matches!(k, FactKind::Message(_)))
+            .collect();
+        assert_eq!(
+            said,
+            [&FactKind::Message("Z progress\n\nA final report".into())]
+        );
+    }
+
+    /// Each spawn keeps the text just above its own call, though the record's
+    /// text is one message.
+    #[test]
+    fn each_spawn_keeps_its_own_reason() {
+        let mut stream = Stream::new(Source::Main);
+        let line = r#"{"type":"assistant","uuid":"a","timestamp":"2026-10-06T10:00:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Check the API."},{"type":"tool_use","id":"t1","name":"Agent","input":{}},{"type":"text","text":"Check the UI."},{"type":"tool_use","id":"t2","name":"Agent","input":{}}]}}"#;
+        let facts = stream.push(line).unwrap().facts;
+        let reasons: Vec<_> = facts
+            .iter()
+            .filter_map(|f| match &f.kind {
+                FactKind::Spawn { reason, .. } => reason.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasons, ["Check the API.", "Check the UI."]);
+    }
+
+    /// A spawn in the record after its text still gives the text just above it,
+    /// not the thinking the merged message came before.
+    #[test]
+    fn a_spawn_in_a_later_record_keeps_the_text_above_it() {
+        let mut stream = Stream::new(Source::Main);
+        let first = r#"{"type":"assistant","uuid":"a","timestamp":"2026-10-06T10:00:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"I will start a review."},{"type":"thinking","thinking":"The UI can wait."},{"type":"text","text":"Check the API first."}]}}"#;
+        let second = r#"{"type":"assistant","uuid":"b","timestamp":"2026-10-06T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Agent","input":{}}]}}"#;
+        stream.push(first).unwrap();
+        let facts = stream.push(second).unwrap().facts;
+        assert!(facts.iter().any(|f| matches!(
+            &f.kind,
+            FactKind::Spawn { reason: Some(r), .. } if r == "Check the API first."
+        )));
     }
 }

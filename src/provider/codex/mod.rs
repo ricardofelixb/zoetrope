@@ -187,7 +187,10 @@ impl Stream {
                                 summary,
                             }));
                             if is_spawn_tool(&name) {
-                                out.push(by(FactKind::Spawn { call: call.clone() }));
+                                out.push(by(FactKind::Spawn {
+                                    call: call.clone(),
+                                    reason: None,
+                                }));
                             }
                         }
                     }
@@ -656,7 +659,7 @@ mod tests {
             spawn
                 .facts
                 .iter()
-                .any(|f| matches!(&f.kind, FactKind::Spawn { call } if call == "call_s"))
+                .any(|f| matches!(&f.kind, FactKind::Spawn { call, .. } if call == "call_s"))
         );
         let started = s.push(r#"{"timestamp":"2026-08-26T16:13:35.505Z","ordinal":2,"type":"event_msg","payload":{"type":"item_completed","thread_id":"a","item":{"type":"SubAgentActivity","id":"call_s","kind":"started","agent_thread_id":"c","agent_path":"/root/explore_theme"},"started_at_ms":1787760815505,"completed_at_ms":1787760815505}}"#).unwrap();
         assert!(matches!(

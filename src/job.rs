@@ -15,6 +15,22 @@
 //! {"member":"review","told":"That finding is intended.","ts":"…"}
 //! ```
 //!
+//! One manifest can hold several armies, each drawn as its own tree: a
+//! `group` line is a node under the job's root, and a member line naming it as
+//! its `parent` hangs its root under the group instead (a member naming a group
+//! whose line is not read yet still hangs under it). A `gone` line takes a group
+//! or member off the canvas and out of the counts, with everything under it, and
+//! a later `group` or member line for the same key shows it again, whichever
+//! order they are read in.
+//!
+//! ```text
+//! {"group":"conductor-1","label":"Claude (conductor)","ts":"…"}
+//! {"member":"plan","parent":"conductor-1","label":"plan: Opus (claude)","session":"6f1c2a9e-…","ts":"…"}
+//! {"gone":"conductor-1","ts":"…"}
+//! ```
+//!
+//! A group and a member never share a key, and `gone` needs its `ts`.
+//!
 //! The first line is the header (`"zoe":"job"`). Every other line names a
 //! member: its key, an optional label and task, and its session by `path` (any
 //! file of it; relative to the manifest's directory) or by `session` id, or
@@ -55,7 +71,7 @@ pub fn is_job_id(id: &str) -> bool {
 pub fn read_header(manifest: &Path) -> Option<Header> {
     match parse_line(&crate::provider::read_head(manifest)?)? {
         Line::Header(header) => Some(header),
-        Line::Member(_) | Line::Told(_) => None,
+        _ => None,
     }
 }
 
@@ -88,6 +104,9 @@ pub struct Entry {
     /// What the member was asked to do.
     #[serde(default)]
     pub task: Option<String>,
+    /// The group the member's root hangs under; the job's root when absent.
+    #[serde(default)]
+    pub parent: Option<String>,
     #[serde(default)]
     pub path: Option<PathBuf>,
     #[serde(default)]
@@ -123,16 +142,36 @@ pub struct Told {
     pub ts: Option<DateTime<Utc>>,
 }
 
+/// A group line: a node under the job's root that members hang under.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Group {
+    pub group: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub ts: Option<DateTime<Utc>>,
+}
+
+/// A gone line: the group or member is hidden, with everything under it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Gone {
+    pub gone: String,
+    pub ts: DateTime<Utc>,
+}
+
 /// One manifest line.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Line {
     Header(Header),
     Member(Entry),
     Told(Told),
+    Group(Group),
+    Gone(Gone),
 }
 
 /// Parse one manifest line. `None` for a blank, unreadable or unknown line,
-/// and for a member that names no session or has an unusable key.
+/// for a member that names no session or has an unusable key or parent, and
+/// for a `gone` without a time.
 pub fn parse_line(line: &str) -> Option<Line> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if value.get("zoe").is_some() {
@@ -143,8 +182,18 @@ pub fn parse_line(line: &str) -> Option<Line> {
         let told: Told = serde_json::from_value(value).ok()?;
         return valid_key(&told.member).then_some(Line::Told(told));
     }
+    if value.get("group").is_some() {
+        let group: Group = serde_json::from_value(value).ok()?;
+        return valid_key(&group.group).then_some(Line::Group(group));
+    }
+    if value.get("gone").is_some() {
+        let gone: Gone = serde_json::from_value(value).ok()?;
+        return valid_key(&gone.gone).then_some(Line::Gone(gone));
+    }
     let entry: Entry = serde_json::from_value(value).ok()?;
-    let usable = valid_key(&entry.member) && (entry.path.is_some() || entry.session.is_some());
+    let usable = valid_key(&entry.member)
+        && entry.parent.as_deref().is_none_or(valid_key)
+        && (entry.path.is_some() || entry.session.is_some());
     usable.then_some(Line::Member(entry))
 }
 
@@ -221,16 +270,70 @@ pub fn header_statements(header: &Header, manifest: &Path) -> Vec<Statement> {
     ]
 }
 
+/// A node stated by its manifest line at `ts`, with its title if the line has
+/// one: what shows it again after a `gone` before then.
+fn declaration(root: &str, ts: Option<DateTime<Utc>>, title: Option<String>) -> Fact {
+    Fact {
+        agent: Some(root.into()),
+        ts,
+        kind: FactKind::Declared(title),
+    }
+}
+
+/// A member root stated again, as when a later line names its session once more.
+pub fn redeclared(root: &str, ts: Option<DateTime<Utc>>) -> Statement {
+    declaration(root, ts, None).into()
+}
+
+/// What a group line states: the group under the job's root, titled by its
+/// label (its key when there is none).
+pub fn group_statement(group: &Group) -> Statement {
+    let fact = |kind| Fact {
+        agent: Some(group.group.clone()),
+        ts: group.ts,
+        kind,
+    };
+    Statement {
+        at: group.ts,
+        facts: vec![
+            fact(FactKind::Agent {
+                kind: AgentKind::Group,
+                parent: Some(MAIN_ID.into()),
+                agent_type: None,
+                description: None,
+                spawned_by: None,
+                interactive: false,
+            }),
+            declaration(
+                &group.group,
+                group.ts,
+                Some(group.label.clone().unwrap_or_else(|| group.group.clone())),
+            ),
+        ],
+    }
+}
+
+/// What a gone line states.
+pub fn gone_statement(gone: &Gone) -> Statement {
+    Fact {
+        agent: Some(gone.gone.clone()),
+        ts: Some(gone.ts),
+        kind: FactKind::Gone,
+    }
+    .into()
+}
+
 /// One session of a job, and how its facts are renamed into the job's tree.
 ///
 /// The member's root becomes `root` (its key, or `key~2` for a second session
 /// under the same key), any other agent `root/id`, and every call `root/call`,
 /// so neither agent nor call ids collide between members. The root is born as
-/// a subagent of the job's root: a `claude -p` or `codex exec` run is a batch
+/// a subagent of the job's root (or of the group its entry names): a `claude -p` or `codex exec` run is a batch
 /// process, so it is running while active and done when it goes quiet.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Member {
     pub root: AgentId,
+    parent: Option<String>,
     label: String,
     task: Option<String>,
     ts: Option<DateTime<Utc>>,
@@ -241,6 +344,7 @@ impl Member {
         Member {
             label: entry.label.clone().unwrap_or_else(|| root.clone()),
             root,
+            parent: entry.parent.clone(),
             task: entry.task.clone(),
             ts: entry.ts,
         }
@@ -249,12 +353,17 @@ impl Member {
     /// The member's node, stated when its manifest line is read, before its
     /// session has said anything.
     pub fn birth(&self) -> Statement {
-        Fact {
-            agent: Some(self.root.clone()),
-            ts: self.ts,
-            kind: self.birth_kind(),
+        Statement {
+            at: self.ts,
+            facts: vec![
+                Fact {
+                    agent: Some(self.root.clone()),
+                    ts: self.ts,
+                    kind: self.birth_kind(),
+                },
+                declaration(&self.root, self.ts, None),
+            ],
         }
-        .into()
     }
 
     /// Identical wherever it is stated (the manifest line and the session's own
@@ -262,7 +371,7 @@ impl Member {
     fn birth_kind(&self) -> FactKind {
         FactKind::Agent {
             kind: AgentKind::Subagent,
-            parent: Some(MAIN_ID.into()),
+            parent: Some(self.parent.clone().unwrap_or_else(|| MAIN_ID.into())),
             agent_type: Some(self.label.clone()),
             description: self.task.clone(),
             spawned_by: None,
@@ -370,8 +479,9 @@ impl Member {
                     call: self.call(&call),
                     outcome,
                 },
-                FactKind::Spawn { call } => FactKind::Spawn {
+                FactKind::Spawn { call, reason } => FactKind::Spawn {
                     call: self.call(&call),
+                    reason,
                 },
                 // The member's prompts are the job's chapters too: the job's
                 // spine is its root's prompts.
@@ -403,6 +513,8 @@ impl Member {
                 | FactKind::Reasoning(_)
                 | FactKind::Told(_)
                 | FactKind::Ended(_)
+                | FactKind::Declared(_)
+                | FactKind::Gone
                 | FactKind::Tally(_)) => kind,
             };
             facts.push(Fact { agent, ts, kind });
@@ -424,6 +536,7 @@ mod tests {
             member: member.into(),
             label: Some(format!("{member}: someone")),
             task: Some("do it".into()),
+            parent: None,
             path: None,
             session: Some("s".into()),
             provider: None,
@@ -534,7 +647,13 @@ mod tests {
                         summary: None,
                     },
                 ),
-                fact(MAIN_ID, FactKind::Spawn { call: "c1".into() }),
+                fact(
+                    MAIN_ID,
+                    FactKind::Spawn {
+                        call: "c1".into(),
+                        reason: None,
+                    },
+                ),
                 fact(
                     "a1",
                     FactKind::ToolEnd {
@@ -556,7 +675,7 @@ mod tests {
             ],
         );
         assert!(matches!(&out[0].kind, FactKind::ToolStart { call, .. } if call == "impl/c1"));
-        assert!(matches!(&out[1].kind, FactKind::Spawn { call } if call == "impl/c1"));
+        assert!(matches!(&out[1].kind, FactKind::Spawn { call, .. } if call == "impl/c1"));
         assert_eq!(out[2].agent.as_deref(), Some("impl/a1"));
         assert!(matches!(&out[2].kind, FactKind::ToolEnd { call, .. } if call == "impl/c2"));
         assert!(matches!(
@@ -693,5 +812,149 @@ mod tests {
         ));
         assert!(matches!(&st[0].facts[1].kind, FactKind::Prompt(t) if t == "fix the bug"));
         assert!(st[1].is_session_meta());
+    }
+
+    fn fold(facts: &[&Fact]) -> crate::state::session::SessionModel {
+        let mut model = crate::state::session::SessionModel::new("j".into());
+        for f in facts {
+            model.apply_fact(f);
+        }
+        model
+    }
+
+    fn at(minute: u32) -> Option<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(&format!("2026-10-06T10:{minute:02}:00Z"))
+            .ok()
+            .map(|d| d.with_timezone(&Utc))
+    }
+
+    #[test]
+    fn a_group_line_and_a_member_under_it() {
+        let Some(Line::Group(group)) = parse_line(
+            r#"{"group":"c-1","label":"Claude (conductor)","ts":"2026-10-06T10:00:00Z"}"#,
+        ) else {
+            panic!("expected a group");
+        };
+        assert!(parse_line(r#"{"group":"main"}"#).is_none());
+        assert!(parse_line(r#"{"group":"a/b"}"#).is_none());
+        let Some(Line::Member(e)) = parse_line(r#"{"member":"plan","parent":"c-1","session":"s"}"#)
+        else {
+            panic!("expected a member");
+        };
+        assert_eq!(e.parent.as_deref(), Some("c-1"));
+        assert!(parse_line(r#"{"member":"plan","parent":"a~2","session":"s"}"#).is_none());
+
+        let member = Member::new("plan".into(), &e);
+        let birth = member.birth();
+        let facts = group_statement(&group).facts;
+        let mut all: Vec<&Fact> = facts.iter().chain(&birth.facts).collect();
+        // The same tree whichever line is read first.
+        for _ in 0..2 {
+            let model = fold(&all);
+            let node = model.agent("c-1").unwrap();
+            assert_eq!(node.kind, AgentKind::Group);
+            assert_eq!(node.parent.as_deref(), Some(MAIN_ID));
+            assert_eq!(node.agent_type.as_deref(), Some("Claude (conductor)"));
+            assert_eq!(model.agent("plan").unwrap().parent.as_deref(), Some("c-1"));
+            all.reverse();
+        }
+        // The session's own root birth states the same parent.
+        let rewritten = member.rewrite(Statement {
+            at: None,
+            facts: vec![fact(
+                MAIN_ID,
+                FactKind::Agent {
+                    kind: AgentKind::Main,
+                    parent: None,
+                    agent_type: None,
+                    description: None,
+                    spawned_by: None,
+                    interactive: true,
+                },
+            )],
+        });
+        assert_eq!(rewritten.facts[0].kind, birth.facts[0].kind);
+    }
+
+    #[test]
+    fn gone_hides_a_group_with_its_members_until_stated_again() {
+        let Some(Line::Gone(gone)) = parse_line(r#"{"gone":"c-1","ts":"2026-10-06T10:05:00Z"}"#)
+        else {
+            panic!("expected a gone");
+        };
+        assert!(parse_line(r#"{"gone":"c-1"}"#).is_none(), "no time");
+        let group = |minute| {
+            group_statement(&Group {
+                group: "c-1".into(),
+                label: None,
+                ts: at(minute),
+            })
+            .facts
+        };
+        let mut e = entry("plan");
+        e.parent = Some("c-1".into());
+        e.ts = at(1);
+        let member = Member::new("plan".into(), &e).birth().facts;
+        let gone = gone_statement(&gone).facts;
+        let (early, late) = (group(0), group(9));
+
+        // Hidden in any reading order, shown again by a later line in any.
+        for order in [[&early, &member, &gone], [&gone, &early, &member]] {
+            let facts: Vec<&Fact> = order.iter().flat_map(|f| f.iter()).collect();
+            let model = fold(&facts);
+            assert!(model.hidden("c-1") && model.hidden("plan"));
+            assert_eq!(model.agent_count(), 1, "only the root is counted");
+
+            let mut again = facts.clone();
+            again.extend(&late);
+            assert!(!fold(&again).hidden("plan"));
+            again.rotate_right(2);
+            assert!(!fold(&again).hidden("c-1"));
+        }
+    }
+
+    #[test]
+    fn the_latest_declaration_titles_a_group_in_any_order() {
+        let titled = |minute, label: &str| {
+            group_statement(&Group {
+                group: "c".into(),
+                label: Some(label.into()),
+                ts: at(minute),
+            })
+            .facts
+        };
+        let (old, new) = (titled(1, "old title"), titled(2, "new title"));
+        for order in [[&old, &new], [&new, &old]] {
+            let facts: Vec<&Fact> = order.iter().flat_map(|f| f.iter()).collect();
+            let model = fold(&facts);
+            assert_eq!(
+                model.agent("c").unwrap().agent_type.as_deref(),
+                Some("new title")
+            );
+        }
+    }
+
+    #[test]
+    fn a_transcript_birth_does_not_show_a_removed_member() {
+        let mut e = entry("plan");
+        e.ts = at(0);
+        let member = Member::new("plan".into(), &e);
+        let birth = member.birth().facts;
+        let gone = gone_statement(&Gone {
+            gone: "plan".into(),
+            ts: at(1).unwrap(),
+        })
+        .facts;
+        // The session's first record arrives after the removal.
+        let mut record = fact(MAIN_ID, birth[0].kind.clone());
+        record.ts = at(2);
+        let records = member
+            .rewrite(Statement {
+                at: record.ts,
+                facts: vec![record],
+            })
+            .facts;
+        let facts: Vec<&Fact> = birth.iter().chain(&gone).chain(&records).collect();
+        assert!(fold(&facts).hidden("plan"));
     }
 }

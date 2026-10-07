@@ -1,9 +1,10 @@
 //! An agent's conversation, as the detail panel shows it: what it was asked,
 //! what a person told it while it ran, and what it said, with the agents it
 //! spawned indented under it. The root of a session, or a job, shows everyone's.
-//! Its tool calls are one line, see [`tools`].
+//! A conductor's card (a group of a job's manifest) shows only its dealings with
+//! its agents, see [`log`]. Its tool calls are one line, see [`tools`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use ratatui::style::{Modifier, Style};
@@ -61,7 +62,8 @@ pub(crate) fn lines(
     palette: &rataflow::Palette,
 ) -> Vec<Line<'static>> {
     let job = crate::job::is_job_id(&model.session_id);
-    let base = depth(model, scope) + usize::from(job && scope == MAIN_ID);
+    let base =
+        depth(model, scope) + usize::from(job && scope == MAIN_ID || conductor(model, scope));
     let subtle = Style::default().fg(palette.subtle);
     let code = Style::default().fg(palette.accent);
     let mut out = Vec::new();
@@ -117,6 +119,7 @@ pub(crate) fn lines(
                     accent,
                     false,
                 ),
+                EntryKind::Waiting => continue,
                 EntryKind::Message => (
                     (!own).then(|| who.clone()),
                     Style::default()
@@ -238,14 +241,75 @@ fn within(model: &SessionModel, id: &str, scope: &str) -> bool {
     false
 }
 
+/// Whether `scope` is a conductor: a group of a job's manifest, which hangs
+/// under the job's root (a member's own groups hang under the member).
+fn conductor(model: &SessionModel, scope: &str) -> bool {
+    crate::job::is_job_id(&model.session_id)
+        && model
+            .agent(scope)
+            .is_some_and(|a| a.kind == AgentKind::Group && a.parent.as_deref() == Some(MAIN_ID))
+}
+
+/// A conductor's dealings with its agents, in time order: each brief it sent a
+/// member (a member root's prompt), each message a person told one, and each
+/// member's final report, its latest message at or before each of its turn
+/// ends and not one already reported. Nothing else of theirs is shown.
+fn log<'a>(model: &'a SessionModel, scope: &str) -> Vec<Item<'a>> {
+    let feed: Vec<&Entry> = model
+        .feed()
+        .filter(|e| e.agent != scope && within(model, &e.agent, scope))
+        .collect();
+    let member = |id: &str| {
+        model
+            .agent(id)
+            .is_some_and(|a| a.parent.as_deref() == Some(scope))
+    };
+    let mut latest: HashMap<&str, &Entry> = HashMap::new();
+    let mut reported: HashMap<&str, &Entry> = HashMap::new();
+    let mut items = Vec::new();
+    for e in &feed {
+        match e.kind {
+            // The session holds a told message as a prompt that starts with it.
+            EntryKind::Prompt
+                if member(&e.agent)
+                    && !feed.iter().any(|t| {
+                        t.kind == EntryKind::Told
+                            && t.agent == e.agent
+                            && t.ts <= e.ts
+                            && e.text.starts_with(t.text.as_str())
+                    }) =>
+            {
+                items.push(Item::Entry(e));
+            }
+            EntryKind::Told => items.push(Item::Entry(e)),
+            EntryKind::Message => {
+                latest.insert(&e.agent, e);
+            }
+            EntryKind::Waiting if member(&e.agent) => {
+                if let Some(&report) = latest.get(e.agent.as_str())
+                    && reported.insert(&e.agent, report) != Some(report)
+                {
+                    items.push(Item::Entry(report));
+                }
+            }
+            _ => {}
+        }
+    }
+    items.sort_by_key(Item::ts);
+    items
+}
+
 /// What the conversation shows, in time order. A job's root repeats each
 /// member's prompts as its own chapters, and a message told while an agent ran
 /// is in its session as a prompt that starts with it: neither is shown twice.
 fn items<'a>(model: &'a SessionModel, scope: &str) -> Vec<Item<'a>> {
+    if conductor(model, scope) {
+        return log(model, scope);
+    }
     let job = crate::job::is_job_id(&model.session_id);
     let feed: Vec<&Entry> = model
         .feed()
-        .filter(|e| within(model, &e.agent, scope))
+        .filter(|e| e.kind != EntryKind::Waiting && within(model, &e.agent, scope))
         .collect();
     let member_prompts: HashSet<(Option<DateTime<Utc>>, &str)> = feed
         .iter()
@@ -675,5 +739,147 @@ mod tests {
             "see run.py:3 now"
         );
         assert_eq!(plain("a [b] c [d](e"), "a [b] c [d](e");
+    }
+
+    /// A conductor's card: its briefs, what the user told its agents and their
+    /// final reports, in time order, and nothing else of theirs.
+    #[test]
+    fn a_conductor_reads_as_its_dealings_with_its_agents() {
+        let mut model = SessionModel::new("job:j".into());
+        let group = |parent: &str| FactKind::Agent {
+            kind: AgentKind::Group,
+            parent: Some(parent.into()),
+            agent_type: None,
+            description: None,
+            spawned_by: None,
+            interactive: false,
+        };
+        apply(&mut model, "c1", 0, group(MAIN_ID));
+        apply(
+            &mut model,
+            "c1",
+            0,
+            FactKind::Label {
+                agent_type: Some("Claude (conductor)".into()),
+                description: None,
+            },
+        );
+        let member = FactKind::Agent {
+            kind: AgentKind::Subagent,
+            parent: Some("c1".into()),
+            agent_type: Some("review: Sol".into()),
+            description: None,
+            spawned_by: None,
+            interactive: false,
+        };
+        apply(&mut model, "review", 1, member);
+        apply(
+            &mut model,
+            "review",
+            1,
+            FactKind::Prompt("Review this change.".into()),
+        );
+        apply(
+            &mut model,
+            "review",
+            2,
+            FactKind::Message("Looking.".into()),
+        );
+        apply(&mut model, "review", 2, FactKind::Reasoning("Hmm.".into()));
+        apply(
+            &mut model,
+            "review",
+            2,
+            FactKind::ToolStart {
+                call: "t".into(),
+                name: "Bash".into(),
+                summary: Some("git diff".into()),
+            },
+        );
+        apply(
+            &mut model,
+            "review",
+            3,
+            FactKind::Told("that is intended".into()),
+        );
+        apply(
+            &mut model,
+            "review",
+            3,
+            FactKind::Prompt("that is intended\n\n(wrapped)".into()),
+        );
+        apply(
+            &mut model,
+            "review",
+            4,
+            FactKind::Message("VERDICT: clean".into()),
+        );
+        apply(&mut model, "review", 5, FactKind::Waiting);
+        // A subagent of the member, and a turn end of its own: not reports.
+        let sub = FactKind::Agent {
+            kind: AgentKind::Subagent,
+            parent: Some("review".into()),
+            agent_type: Some("helper".into()),
+            description: None,
+            spawned_by: None,
+            interactive: false,
+        };
+        apply(&mut model, "review/a1", 4, sub);
+        apply(
+            &mut model,
+            "review/a1",
+            4,
+            FactKind::Message("sub said".into()),
+        );
+        apply(&mut model, "review/a1", 5, FactKind::Waiting);
+
+        assert!(conductor(&model, "c1"));
+        assert!(!conductor(&model, MAIN_ID) && !conductor(&model, "review"));
+        let shown = text(lines(&model, "c1", 100, false, &rataflow::Palette::DARK));
+        assert!(shown.contains("conductor → review: Sol\n"), "{shown}");
+        assert!(shown.contains("Review this change."), "{shown}");
+        assert!(shown.contains("you → review: Sol\n"), "{shown}");
+        assert_eq!(shown.matches("that is intended").count(), 1, "{shown}");
+        assert!(shown.contains("VERDICT: clean"), "{shown}");
+        for left_out in ["Looking.", "Hmm.", "sub said", "wrapped", "started"] {
+            assert!(!shown.contains(left_out), "{left_out} in {shown}");
+        }
+        // The report is shown once however many turns end after it.
+        apply(&mut model, "review", 6, FactKind::Waiting);
+        let again = text(lines(&model, "c1", 100, false, &rataflow::Palette::DARK));
+        assert_eq!(again.matches("VERDICT: clean").count(), 1, "{again}");
+        // The tool line still counts every call under the group.
+        assert!(tools(&model, "c1", 80, None, &rataflow::Palette::DARK).is_some());
+    }
+
+    /// A tell sent after a brief does not take the brief away, however much of
+    /// it the tell repeats.
+    #[test]
+    fn a_later_tell_leaves_the_earlier_brief() {
+        let mut model = SessionModel::new("job:j".into());
+        let group = FactKind::Agent {
+            kind: AgentKind::Group,
+            parent: Some(MAIN_ID.into()),
+            agent_type: Some("c".into()),
+            description: None,
+            spawned_by: None,
+            interactive: false,
+        };
+        apply(&mut model, "c1", 0, group);
+        let member = FactKind::Agent {
+            kind: AgentKind::Subagent,
+            parent: Some("c1".into()),
+            agent_type: Some("review".into()),
+            description: None,
+            spawned_by: None,
+            interactive: false,
+        };
+        apply(&mut model, "review", 1, member);
+        let brief = FactKind::Prompt("Review this change.".into());
+        apply(&mut model, "review", 1, brief);
+        apply(&mut model, "review", 2, FactKind::Told("Review".into()));
+        let shown = text(lines(&model, "c1", 100, false, &rataflow::Palette::DARK));
+        assert!(shown.contains("Review this change."), "{shown}");
+        assert!(shown.contains("you → review"), "{shown}");
     }
 }

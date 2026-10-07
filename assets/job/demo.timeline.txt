@@ -1,5 +1,5 @@
 2026-06-21T09:59:00+00:00  Agent@main Prompt@main
-2026-06-21T10:00:00+00:00  Agent@explore
+2026-06-21T10:00:00+00:00  Agent@explore Declared@explore
 2026-06-21T10:00:00+00:00  Agent@explore Prompt@main Prompt@explore
 2026-06-21T10:00:09+00:00  Model@explore Tokens@explore Reasoning@explore Message@explore ToolStart@explore Spawn@explore ToolStart@explore Spawn@explore ToolStart@explore Spawn@explore ToolStart@explore Spawn@explore ToolStart@explore Spawn@explore
 2026-06-21T10:00:12+00:00  Label@explore/wf_demo01 ToolEnd@explore
@@ -58,7 +58,7 @@
 2026-06-21T10:03:16+00:00  ToolEnd@explore
 2026-06-21T10:03:20+00:00  Model@explore Tokens@explore Message@explore Waiting@explore
 2026-09-07T13:25:14.937+00:00  Agent@review
-2026-09-07T13:25:15.105+00:00  Agent@review
+2026-09-07T13:25:15.105+00:00  Agent@review Declared@review
 2026-09-07T13:25:15.105+00:00  Activity@review
 2026-09-07T13:25:16.971+00:00  Activity@review
 2026-09-07T13:25:16.971+00:00  Activity@review

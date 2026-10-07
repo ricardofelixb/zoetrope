@@ -106,7 +106,13 @@ pub enum FactKind {
     ToolEnd { call: CallId, outcome: Outcome },
     /// This tool call spawns an agent. Lets the core record provenance for the
     /// child (which prompt era, which reasoning) before the child appears.
-    Spawn { call: CallId },
+    /// `reason` is the text or thinking the agent wrote just above the call in
+    /// the same record, when the format places it there; without it the core
+    /// uses the agent's latest.
+    Spawn {
+        call: CallId,
+        reason: Option<String>,
+    },
     /// The agent's end was observed in the format. Authoritative; pins the
     /// agent against time-derived revival.
     Ended(AgentStatus),
@@ -116,6 +122,15 @@ pub enum FactKind {
     Tally(String),
     /// The session's display title.
     Title(String),
+    /// The agent (or group) is stated again by the orchestrator that runs it
+    /// (a manifest line), which shows it again after a `Gone` before this time.
+    /// The label, when there is one, is the node's title, the latest declaration
+    /// naming it. Distinct from the agent's own records, which never revive it.
+    Declared(Option<String>),
+    /// The agent (or group) is taken off the canvas, with everything under it,
+    /// until it is stated again at a later time. Not a deletion: what it said
+    /// stays folded.
+    Gone,
 }
 
 /// What one record stated, and when the record itself was written.
@@ -181,6 +196,8 @@ impl FactKind {
             FactKind::Session { .. } => "Session",
             FactKind::Tally(_) => "Tally",
             FactKind::Title(_) => "Title",
+            FactKind::Declared(_) => "Declared",
+            FactKind::Gone => "Gone",
         }
     }
 }

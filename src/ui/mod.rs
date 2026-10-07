@@ -325,7 +325,7 @@ pub(crate) fn compute_scrubber_tally(
                 FactKind::ToolStart { .. } => counts[c] += 1,
                 // A spawn call marks ❋ only when its subagent has no birth
                 // record (not loaded); otherwise the birth marks it.
-                FactKind::Spawn { call } => {
+                FactKind::Spawn { call, .. } => {
                     spawn_at[c] |= !born_calls.contains(call.as_str());
                 }
                 FactKind::ToolEnd {
