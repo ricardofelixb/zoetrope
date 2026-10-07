@@ -1077,7 +1077,7 @@ mod tests {
                     name: name.into(),
                     summary: Some(summary.into()),
                     ts: Some(ts(t)),
-                    end_ts: end.map(&ts),
+                    end_ts: end.map(ts),
                     state,
                 }
             };
