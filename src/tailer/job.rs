@@ -125,6 +125,7 @@ impl JobFeed {
         };
         let member = Member::new(root, entry);
         out.push(member.birth());
+        out.push(member.session(session.provider, &session.id));
         self.members
             .push((member, LiveSession::new(session, None, entry.provider)));
     }

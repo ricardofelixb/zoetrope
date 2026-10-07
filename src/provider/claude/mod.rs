@@ -90,8 +90,8 @@ impl Record {
 }
 
 /// One Claude file being read: which file it is, and what a line needs from
-/// the lines before it. In this format that is only the inherited timestamp: a
-/// line without one rides along with its predecessor.
+/// the lines before it: the inherited timestamp (a line without one rides
+/// along with its predecessor), and the working directory last stated.
 #[derive(Debug, Clone)]
 pub struct Stream {
     source: Source,
@@ -99,6 +99,9 @@ pub struct Stream {
     /// Whether the main transcript has stated its own agent yet. The root
     /// has no record of its own birth, so its first dated line states it.
     announced: bool,
+    /// The main transcript's working directory, stated when it changes: every
+    /// line carries it, and the session is resumed from it.
+    cwd: Option<String>,
 }
 
 impl Stream {
@@ -107,6 +110,7 @@ impl Stream {
             source,
             last_ts: None,
             announced: false,
+            cwd: None,
         }
     }
 
@@ -131,6 +135,13 @@ impl Stream {
             if f.ts.is_none() {
                 f.ts = at;
             }
+        }
+        if matches!(self.source, Source::Main)
+            && let Some(cwd) = entry_cwd(entry)
+            && self.cwd.as_deref() != Some(cwd)
+        {
+            self.cwd = Some(cwd.to_string());
+            push_session(&mut out, "cwd", self.cwd.clone());
         }
         // The root agent, stated once, on the first line that is activity
         // rather than session metadata (a metadata-only statement stays off
@@ -176,6 +187,17 @@ fn entry_timestamp(entry: &Entry) -> Option<DateTime<Utc>> {
         Entry::Assistant(e) => e.envelope.timestamp,
         Entry::System(e) => e.envelope.timestamp,
         Entry::Attachment(e) => e.envelope.timestamp,
+        _ => None,
+    }
+}
+
+/// The working directory an entry's envelope names, if it carries one.
+fn entry_cwd(entry: &Entry) -> Option<&str> {
+    match entry {
+        Entry::User(e) => e.envelope.cwd.as_deref(),
+        Entry::Assistant(e) => e.envelope.cwd.as_deref(),
+        Entry::System(e) => e.envelope.cwd.as_deref(),
+        Entry::Attachment(e) => e.envelope.cwd.as_deref(),
         _ => None,
     }
 }

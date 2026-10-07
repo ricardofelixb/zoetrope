@@ -2,7 +2,8 @@
 //!
 //! App-level keys (`q`/`ctrl-c` quit, `space` play/pause, `[`/`]` step + `End`/`g`
 //! go-live transport, `s` pacing, `o`/`f`/`r` camera, `i`/`?` overlays) mutate `app`
-//! directly; everything else is
+//! directly, and `enter` hands the selected agent's session to `--on-enter`;
+//! everything else is
 //! forwarded to the flow — first `handle_controls_key_event` (zoom/fit), then
 //! `handle_key_event` (selection nav), and mouse to `handle_mouse_event`. Flow
 //! events are consumed via `into_events`; the graph is read-only so only
@@ -183,6 +184,11 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> bool {
             return false;
         }
 
+        KeyCode::Enter => {
+            open_selected(app);
+            return false;
+        }
+
         _ => {}
     }
 
@@ -213,6 +219,38 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> bool {
     };
     process_flow_events(app, response.into_events());
     false
+}
+
+/// Run the `--on-enter` command for the selected agent's session, if the card
+/// is one, without waiting for it: what it opens (a resumed chat, most likely)
+/// is the command's business, and zoe stays read-only.
+fn open_selected(app: &mut App) {
+    let Some(command) = app.on_enter.clone() else {
+        return;
+    };
+    let Some(session) = app.selected_agent_id().and_then(|id| app.session_of(&id)) else {
+        return;
+    };
+    let cwd = session.cwd.unwrap_or_default();
+    let mut words = command.split_whitespace().map(|word| {
+        word.replace("{provider}", session.provider.name())
+            .replace("{session}", &session.id)
+            .replace("{cwd}", &cwd)
+    });
+    let Some(program) = words.next() else {
+        return;
+    };
+    let spawned = std::process::Command::new(program)
+        .args(words)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match spawned {
+        // Reaped off the input path, so it never lingers as a zombie.
+        Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
+        Err(e) => app.last_error = Some(format!("--on-enter: {e}")),
+    }
 }
 
 /// Rows moved per PageUp/PageDown in the detail panel's tool-call list.

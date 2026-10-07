@@ -112,6 +112,7 @@ zoe <file.jsonl> --speed N   # playback speed (default 8.0)
 zoe --provider codex ...     # force the format instead of detecting it from the file
 zoe inspect <file|id>        # print the session tree and exit (no TUI)
 zoe <job.jsonl>              # a job: several sessions, any provider, as one tree
+zoe --on-enter <command> ... # what enter runs for the selected agent's session
 ```
 
 Give it a file and it reads the whole transcript, then keeps watching for new lines.
@@ -124,6 +125,12 @@ write a job manifest naming their sessions, and `zoe` shows them as one tree: th
 job at the root, each session under it with everything it spawned. New members
 appear as their lines are written. The format is in
 [docs/DISCOVERY.md §8](docs/DISCOVERY.md#8-jobs-several-sessions-as-one-tree).
+
+`zoe` only reads, but `enter` can hand the selected agent's session to a command of
+your own, to resume it and talk to it. Pass `--on-enter "claude --resume {session}"`,
+or a script that opens a pane: its words are split on spaces, and `{provider}`,
+`{session}` and `{cwd}` become the session's provider, id and working directory.
+`enter` acts on a whole session, which is the root, or each member of a job.
 
 The same engine also runs [in the browser](https://zoetrope.furkankly.dev/app),
 compiled to WebAssembly via [ratzilla](https://github.com/ratatui/ratzilla). Open a
@@ -187,6 +194,7 @@ bar to seek · `?` for everything else.
 | click | open an agent's detail panel |
 | `j` / `k` / `PgUp` / `PgDn` | scroll the detail panel |
 | `i` | session info overlay |
+| `enter` | run `--on-enter` for the selected agent's session |
 | `?` | help overlay |
 | `esc` | close an overlay / clear the selection |
 | `q` / `ctrl-c` | quit |
