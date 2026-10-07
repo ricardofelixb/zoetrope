@@ -549,6 +549,7 @@ fn render_log_line(frame: &mut Frame, row: Rect, app: &App) {
         // The same mark as the spawn on the scrubber's marker strip.
         LogKind::Spawn => (spawn_glyph, bg.fg(spawn_color).add_modifier(Modifier::BOLD)),
         LogKind::Failure => ("✗ ", bg.fg(palette.error).add_modifier(Modifier::BOLD)),
+        LogKind::Message => ("› ", bg.fg(palette.text)),
     };
     // Width left for the text after the "HH:MM:SS " prefix and the 2-col icon.
     let tw = (r.width as usize).saturating_sub(time.chars().count() + 3);

@@ -38,6 +38,9 @@ pub struct AgentNode {
     pub title: String,
     /// Truncated description shown under the title.
     pub description: Option<String>,
+    /// The agent's latest message, shown in the description's place while it
+    /// works: its status update.
+    pub said: Option<String>,
     pub status: AgentStatus,
     /// Number of tool calls (for the `⚒ N tools` line).
     pub tool_count: usize,
@@ -141,7 +144,14 @@ impl NodeContent for AgentNode {
         let mut lines: Vec<Line> = Vec::new();
         lines.push(title_line);
 
-        if let Some(desc) = self.description.as_ref().filter(|d| !d.is_empty()) {
+        let saying = self
+            .said
+            .as_ref()
+            .filter(|s| self.status == AgentStatus::Running && !s.is_empty());
+        if let Some(said) = saying {
+            let said = truncate(&format!("› {said}"), inner_w);
+            lines.push(Line::from(Span::styled(said, bg_style.fg(palette.text))));
+        } else if let Some(desc) = self.description.as_ref().filter(|d| !d.is_empty()) {
             let desc = truncate(desc, inner_w);
             lines.push(Line::from(Span::styled(desc, bg_style.fg(palette.subtle))));
         }
@@ -240,6 +250,7 @@ mod tests {
         let node = AgentNode {
             title: "claude".into(),
             description: None,
+            said: None,
             status: AgentStatus::Done,
             tool_count: 3,
             last_tool: Some("Bash".into()),

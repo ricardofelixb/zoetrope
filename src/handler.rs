@@ -375,6 +375,7 @@ mod tests {
                 crate::ui::nodes::AgentNode {
                     title: id.into(),
                     description: None,
+                    said: None,
                     status: crate::state::session::AgentStatus::Running,
                     tool_count: 0,
                     last_tool: None,
@@ -428,6 +429,7 @@ mod tests {
             crate::ui::nodes::AgentNode {
                 title: "a".into(),
                 description: None,
+                said: None,
                 status: crate::state::session::AgentStatus::Running,
                 tool_count: 0,
                 last_tool: None,
@@ -459,6 +461,7 @@ mod tests {
             crate::ui::nodes::AgentNode {
                 title: "a".into(),
                 description: None,
+                said: None,
                 status: crate::state::session::AgentStatus::Running,
                 tool_count: 0,
                 last_tool: None,
