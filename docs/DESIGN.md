@@ -93,6 +93,7 @@ src/
 ├── handler.rs     # input routing: app-level keys → App, the rest → the flow; scrubber clicks; process_flow_events
 ├── autopilot.rs   # native-only: the scripted pointer/keystroke pilot behind ZOETROPE_DEMO=1 (see DEMO-ASSETS.md)
 ├── fact.rs        # the provider boundary: Fact + FactKind, the vocabulary every provider speaks and the model folds
+├── job.rs         # jobs: the manifest format and the rewrite that puts several sessions in one tree (DISCOVERY.md §8)
 ├── provider/
 │   ├── mod.rs     # the input side: Provider enum, SessionFile, Session, the Stream enum, open / sweep / assemble (DISCOVERY.md)
 │   ├── harness.rs # (test) the conformance check: fold a fixture in shuffled orders and diff the result against its goldens
@@ -115,6 +116,7 @@ src/
 │   ├── mod.rs     # task entry + shared wire types (TailRequest / UiEvent); the wire carries Statements
 │   ├── live.rs    # live tailing — one poll loop per session, emits UiEvent::Batch
 │   ├── replay.rs  # replay assembly (native): parse all files up front, merge by ts, then keep tailing
+│   ├── job.rs     # the job feeder (native): tails a manifest and every member session, one batch per tick
 │   ├── item.rs    # portable replay-stream pieces — ReplayItem (a statement + its Timing), dating, and Bundle (the browser's feeder: files as text in, streams kept for appends); IO-free (wasm)
 │   └── bytes.rs   # incremental byte reader: stat / read-appended / split-on-\n / buffer-partial (pure, testable)
 └── ui/

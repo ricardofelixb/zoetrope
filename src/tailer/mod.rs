@@ -48,10 +48,16 @@ pub(crate) use item::date_and_sort_live;
 #[cfg(feature = "native")]
 mod bytes;
 #[cfg(feature = "native")]
+mod job;
+#[cfg(feature = "native")]
 mod live;
 #[cfg(feature = "native")]
 mod replay;
 
+#[cfg(feature = "native")]
+use job::run_job;
+#[cfg(feature = "native")]
+pub use job::{read_job, session_id as job_session_id};
 #[cfg(feature = "native")]
 use live::run_live;
 #[cfg(feature = "native")]
@@ -121,10 +127,10 @@ pub async fn run(
         let Flow::Switch { target, follow } = current else {
             return Ok(());
         };
-        current = if replay {
-            run_replay(&target, only, &ui_tx, &mut req_rx, speed).await
-        } else {
-            run_live(&target, follow, only, &ui_tx, &mut req_rx).await
+        current = match &target {
+            Target::Job(manifest) => run_job(manifest, replay, speed, &ui_tx, &mut req_rx).await,
+            _ if replay => run_replay(&target, only, &ui_tx, &mut req_rx, speed).await,
+            _ => run_live(&target, follow, only, &ui_tx, &mut req_rx).await,
         };
     }
 }
@@ -149,7 +155,7 @@ impl Flow {
     pub(crate) fn from_watch(target: Target) -> Flow {
         let follow = match &target {
             Target::Here(cwd) => Some(cwd.clone()),
-            Target::Path(_) | Target::Id(_) => None,
+            Target::Path(_) | Target::Id(_) | Target::Job(_) => None,
         };
         Flow::Switch { target, follow }
     }

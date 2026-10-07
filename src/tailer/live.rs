@@ -238,7 +238,7 @@ pub(crate) async fn run_live(
         })
         .await;
 
-    tail_loop(session, session_id, ui_tx, req_rx).await
+    tail_loop(Feed::Session(Box::new(session)), session_id, ui_tx, req_rx).await
 }
 
 /// The shared poll loop: every [`POLL_INTERVAL`] read appended bytes and emit a
@@ -246,9 +246,9 @@ pub(crate) async fn run_live(
 /// end here — live tailing after the announce, replay after the bulk hand-off —
 /// so EVERY session keeps tailing and can pick up new appends ("go live"). Auto-
 /// switch to a newer session fires only when `session.follow` is set (a
-/// followed directory), not for a pinned file or id.
+/// followed directory), not for a pinned file, id or job.
 pub(crate) async fn tail_loop(
-    mut session: LiveSession,
+    mut feed: Feed,
     session_id: String,
     ui_tx: &mpsc::Sender<UiEvent>,
     req_rx: &mut mpsc::Receiver<TailRequest>,
@@ -266,12 +266,54 @@ pub(crate) async fn tail_loop(
                 }
             }
             _ = ticker.tick() => {
-                if let Some(target) = poll_live(&mut session, &session_id, ui_tx).await {
-                    return Flow::Switch { target, follow: session.follow.clone() };
+                if let Some(target) = feed.poll(&session_id, ui_tx).await {
+                    return Flow::Switch { target, follow: feed.follow() };
                 }
             }
         }
     }
+}
+
+/// What one poll loop tails: a session, or a job of several
+/// ([`super::job::JobFeed`]).
+pub(crate) enum Feed {
+    Session(Box<LiveSession>),
+    Job(Box<super::job::JobFeed>),
+}
+
+impl Feed {
+    async fn poll(&mut self, session_id: &str, ui_tx: &mpsc::Sender<UiEvent>) -> Option<Target> {
+        match self {
+            Feed::Session(session) => poll_live(session, session_id, ui_tx).await,
+            Feed::Job(job) => job.poll(session_id, ui_tx).await,
+        }
+    }
+
+    fn follow(&self) -> Option<PathBuf> {
+        match self {
+            Feed::Session(session) => session.follow.clone(),
+            Feed::Job(_) => None,
+        }
+    }
+}
+
+/// Read what a session's files gained since the last call: the root, any file
+/// that appeared, and every tracked file. Returns `true` if a file was
+/// truncated or rotated, so the caller must re-attach: its already-applied
+/// content is baked into the App model, and re-reading it in place would
+/// duplicate items and double-count tokens. Patching individual fields would
+/// leave the App's wiped model and the tailer's surviving state inconsistent.
+pub(crate) fn read_session(session: &mut LiveSession, statements: &mut Vec<Statement>) -> bool {
+    let root_path = session.root_path().to_path_buf();
+    match read_appended(&root_path, &mut session.main_state) {
+        ReadResult::Reset => return true,
+        ReadResult::Lines(lines) => {
+            statements.extend(lines.iter().filter_map(|l| session.main_stream.push(l)));
+        }
+        ReadResult::NoChange | ReadResult::Missing => {}
+    }
+    scan_files(session, statements);
+    read_tracked(&mut session.tracked, statements)
 }
 
 /// One poll tick of live tailing. Returns `Some(target)` if the caller should
@@ -283,43 +325,14 @@ async fn poll_live(
 ) -> Option<Target> {
     let mut statements: Vec<Statement> = Vec::new();
 
-    // --- root file ---
-    let root_path = session.root_path().to_path_buf();
-    match read_appended(&root_path, &mut session.main_state) {
-        ReadResult::Reset => {
-            let _ = ui_tx
-                .send(UiEvent::SessionReset {
-                    session_id: session_id.to_string(),
-                })
-                .await;
-            // Truncation = re-attach: returning the SAME session makes run_live
-            // rebuild the whole LiveSession (fresh offsets, seen sidecars,
-            // backfill gate). Patching individual fields in place would leave
-            // the App's wiped model and the tailer's surviving state
-            // inconsistent — agents never re-emitted, and the re-read blips
-            // liveness.
-            return Some(session.reattach());
-        }
-        ReadResult::Lines(lines) => {
-            statements.extend(lines.iter().filter_map(|l| session.main_stream.push(l)));
-        }
-        ReadResult::NoChange | ReadResult::Missing => {}
-    }
-
-    // --- the session's other files: known ones and any that appeared ---
-    scan_files(session, &mut statements);
-
-    // --- read each tracked non-root file ---
-    if read_tracked(&mut session.tracked, &mut statements) {
-        // A tracked file was truncated/rotated: its already-applied content is
-        // baked into the App model, so re-reading it in place would duplicate
-        // items and double-count tokens. Re-attach the whole session, same as
-        // a root-file reset.
+    if read_session(session, &mut statements) {
         let _ = ui_tx
             .send(UiEvent::SessionReset {
                 session_id: session_id.to_string(),
             })
             .await;
+        // Re-attach: returning the SAME session makes run_live rebuild the
+        // whole LiveSession (fresh offsets, seen sidecars, backfill gate).
         return Some(session.reattach());
     }
 
