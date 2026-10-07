@@ -9,7 +9,6 @@
 //! zoe <dir>                 follow another project's live session
 //! zoe <file> --follow       follow a file's live edge instead of replaying
 //! zoe <job.jsonl>           a job: several sessions, any provider, one tree
-//! zoe --all [dir]           every agent under a folder, grouped by repository
 //! zoe <file> --speed N      playback speed multiplier (default 8.0)
 //! zoe --provider <name> ... force the transcript format instead of detecting it
 //! zoe inspect <file|id|dir> headless: print the session tree + info
@@ -21,7 +20,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 
 use zoetrope::fact::Statement;
-use zoetrope::job::Overview;
 use zoetrope::provider::{Provider, ReadMode, Session, Target, open};
 use zoetrope::state::session::SessionModel;
 use zoetrope::state::{App, Mode};
@@ -48,17 +46,12 @@ pub enum Cli {
         follow: bool,
         speed: f64,
         provider: Option<Provider>,
-        /// An overview of every session under the target folder (default: the
-        /// current one) instead of one session.
-        all: bool,
     },
     /// Headless: parse and print the session tree + info; no TUI. The target
     /// resolves like `View`'s: a file, a session id, or a project directory.
     Inspect {
         target: String,
         provider: Option<Provider>,
-        /// As `View`'s: an overview of the folder `target`.
-        all: bool,
     },
 }
 
@@ -75,7 +68,6 @@ USAGE:
     zoe <dir>               follow another project's live session
     zoe <file> --follow     follow a file's live edge instead of replaying
     zoe <job.jsonl>         a job manifest: several sessions as one tree
-    zoe --all [dir]         every agent under a folder, live, grouped by repository
     zoe <file> --speed N    playback speed (default 8.0)
     zoe --provider <name>   force the format (claude, codex) instead of detecting it
     zoe inspect <file|id>   headless: print the session tree + info
@@ -102,11 +94,9 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
         args.next();
         let mut target: Option<String> = None;
         let mut provider = None;
-        let mut all = false;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--provider" => provider = provider_flag(&mut args)?,
-                "--all" => all = true,
                 other if other.starts_with('-') => bail!("unknown flag {other:?}\n\n{USAGE}"),
                 _ => {
                     if target.is_some() {
@@ -116,17 +106,10 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
                 }
             }
         }
-        let target = match target {
-            None if all => ".".to_string(),
-            t => t.ok_or_else(|| {
-                anyhow!("inspect requires a file, a session id or a directory\n\n{USAGE}")
-            })?,
-        };
-        return Ok(Cli::Inspect {
-            target,
-            provider,
-            all,
-        });
+        let target = target.ok_or_else(|| {
+            anyhow!("inspect requires a file, a session id or a directory\n\n{USAGE}")
+        })?;
+        return Ok(Cli::Inspect { target, provider });
     }
 
     // Otherwise: an optional positional target + flags.
@@ -134,7 +117,6 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
     let mut follow = false;
     let mut speed = DEFAULT_REPLAY_SPEED;
     let mut provider = None;
-    let mut all = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -148,7 +130,6 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
                 std::process::exit(0);
             }
             "--follow" => follow = true,
-            "--all" => all = true,
             "--speed" => {
                 let v = args
                     .next()
@@ -178,7 +159,6 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
         follow,
         speed,
         provider,
-        all,
     })
 }
 
@@ -191,7 +171,6 @@ fn parse_session_fully(
 ) -> Result<(SessionModel, zoetrope::state::SessionInfo)> {
     let (id, statements) = match target {
         Target::Job(manifest) => (tailer::job_session_id(manifest), tailer::read_job(manifest)),
-        Target::Overview(folder) => (Overview::session_id(folder), tailer::read_overview(folder)),
         _ => {
             let session = open(target, only)?;
             (session.id.clone(), read_whole(&session)?)
@@ -208,15 +187,14 @@ fn parse_session_fully(
         }
     }
 
+    // Group nodes have no direct completion signal — roll them up from their
+    // children once everything is folded.
+    model.recompute_group_status();
+
     // Interactive agents (main, forks) have no completion signal: derive
     // their liveness against the wall clock — `inspect` is a point-in-time
     // view, so a recently active session shows `running`, a long-quiet one `idle`.
     model.recompute_liveness(Some(chrono::Utc::now()));
-
-    // Group nodes have no direct completion signal — roll them up from their
-    // children once everything is folded and their liveness is known, as the
-    // App's status tick does.
-    model.recompute_group_status();
 
     Ok((model, info))
 }
@@ -244,12 +222,8 @@ fn read_whole(session: &Session) -> Result<Vec<Statement>> {
 /// Run the `inspect` subcommand: fully parse the session and print a tree to
 /// stdout. Returns an error (non-zero exit) on an unreadable file. This is the
 /// headless smoke test — no TTY required.
-async fn run_inspect(target: String, provider: Option<Provider>, all: bool) -> Result<()> {
-    let target = if all {
-        overview_target(Some(target))?
-    } else {
-        resolve_target(target)?
-    };
+async fn run_inspect(target: String, provider: Option<Provider>) -> Result<()> {
+    let target = resolve_target(target)?;
     let (model, info) = parse_session_fully(&target, provider)?;
     print!("{}", zoetrope::state::render::report(&model, &info));
     Ok(())
@@ -268,14 +242,12 @@ async fn run_tui(cli: Cli) -> Result<()> {
         follow,
         speed,
         provider,
-        all,
     } = cli
     else {
         unreachable!("inspect handled in main");
     };
 
     let target = match target {
-        _ if all => overview_target(target)?,
         Some(t) => resolve_target(t)?,
         None => Target::Here(std::env::current_dir().context("resolving current directory")?),
     };
@@ -301,13 +273,6 @@ async fn run_tui(cli: Cli) -> Result<()> {
             let mode = if follow { Mode::Live } else { Mode::Replay };
             (tailer::job_session_id(manifest), mode, true, speed)
         }
-        // An overview is always live: what runs now is the point.
-        Target::Overview(folder) => (
-            Overview::session_id(folder),
-            Mode::Live,
-            false,
-            DEFAULT_REPLAY_SPEED,
-        ),
     };
 
     // Bounded request/event channels for backpressure.
@@ -329,26 +294,6 @@ async fn run_tui(cli: Cli) -> Result<()> {
 
     let app = App::new(session_id, mode);
     tui::run(app, tail_tx, ui_rx).await
-}
-
-/// The folder an overview shows: the argument, or the current directory.
-/// Canonical, so it compares with the directories sessions record, which on
-/// Windows carry no `\\?\` prefix.
-fn overview_target(arg: Option<String>) -> Result<Target> {
-    let dir = match arg {
-        Some(arg) => PathBuf::from(arg),
-        None => std::env::current_dir().context("resolving current directory")?,
-    };
-    let canonical =
-        std::fs::canonicalize(&dir).with_context(|| format!("not found: {}", dir.display()))?;
-    if !canonical.is_dir() {
-        bail!("not a folder: {}", dir.display());
-    }
-    let text = canonical.to_string_lossy().into_owned();
-    Ok(Target::Overview(
-        text.strip_prefix(r"\\?\")
-            .map_or(canonical.clone(), PathBuf::from),
-    ))
 }
 
 /// What a positional argument means: an existing file is a job if its first
@@ -386,11 +331,7 @@ async fn main() -> Result<()> {
 
     let cli = parse_cli(std::env::args())?;
     match cli {
-        Cli::Inspect {
-            target,
-            provider,
-            all,
-        } => run_inspect(target, provider, all).await,
+        Cli::Inspect { target, provider } => run_inspect(target, provider).await,
         other => run_tui(other).await,
     }
 }
@@ -461,13 +402,11 @@ mod tests {
                 follow,
                 speed,
                 provider,
-                all,
             } => {
                 assert_eq!(p, "s.jsonl");
                 assert_eq!(speed, 4.0);
                 assert!(follow);
                 assert_eq!(provider, Some(Provider::Codex));
-                assert!(!all);
             }
             other => panic!("got {other:?}"),
         }
@@ -506,14 +445,9 @@ mod tests {
     #[test]
     fn inspect_takes_one_target_and_a_provider() {
         match cli(&["inspect", "s.jsonl"]).unwrap() {
-            Cli::Inspect {
-                target,
-                provider,
-                all,
-            } => {
+            Cli::Inspect { target, provider } => {
                 assert_eq!(target, "s.jsonl");
                 assert_eq!(provider, None);
-                assert!(!all);
             }
             other => panic!("got {other:?}"),
         }
@@ -528,38 +462,6 @@ mod tests {
         }
         assert!(cli(&["inspect"]).is_err());
         assert!(cli(&["inspect", "a", "b"]).is_err());
-    }
-
-    #[test]
-    fn all_is_an_overview_of_a_folder_or_the_current_one() {
-        assert!(matches!(
-            cli(&["--all", "C:/projects"]).unwrap(),
-            Cli::View { target: Some(t), all: true, .. } if t == "C:/projects"
-        ));
-        assert!(matches!(
-            cli(&["--all"]).unwrap(),
-            Cli::View {
-                target: None,
-                all: true,
-                ..
-            }
-        ));
-        assert!(matches!(
-            cli(&["inspect", "--all"]).unwrap(),
-            Cli::Inspect { target, all: true, .. } if target == "."
-        ));
-        let dir = std::env::temp_dir();
-        let Target::Overview(folder) = overview_target(Some(dir.display().to_string())).unwrap()
-        else {
-            panic!("expected an overview");
-        };
-        assert!(folder.is_dir());
-        assert!(
-            !folder.to_string_lossy().starts_with(r"\\?\"),
-            "{}",
-            folder.display()
-        );
-        assert!(overview_target(Some("./nope-not-here".into())).is_err());
     }
 
     #[test]
