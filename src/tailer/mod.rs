@@ -55,9 +55,9 @@ mod live;
 mod replay;
 
 #[cfg(feature = "native")]
-use job::run_job;
+pub use job::{read_job, read_overview, session_id as job_session_id};
 #[cfg(feature = "native")]
-pub use job::{read_job, session_id as job_session_id};
+use job::{run_job, run_overview};
 #[cfg(feature = "native")]
 use live::run_live;
 #[cfg(feature = "native")]
@@ -129,6 +129,7 @@ pub async fn run(
         };
         current = match &target {
             Target::Job(manifest) => run_job(manifest, replay, speed, &ui_tx, &mut req_rx).await,
+            Target::Overview(folder) => run_overview(folder, &ui_tx, &mut req_rx).await,
             _ if replay => run_replay(&target, only, &ui_tx, &mut req_rx, speed).await,
             _ => run_live(&target, follow, only, &ui_tx, &mut req_rx).await,
         };
@@ -155,7 +156,7 @@ impl Flow {
     pub(crate) fn from_watch(target: Target) -> Flow {
         let follow = match &target {
             Target::Here(cwd) => Some(cwd.clone()),
-            Target::Path(_) | Target::Id(_) | Target::Job(_) => None,
+            Target::Path(_) | Target::Id(_) | Target::Job(_) | Target::Overview(_) => None,
         };
         Flow::Switch { target, follow }
     }

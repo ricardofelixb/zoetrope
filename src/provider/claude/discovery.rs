@@ -338,6 +338,26 @@ pub fn project_key(cwd: &Path) -> String {
     sanitize_cwd(cwd)
 }
 
+/// How many of a root's first lines to look through for its working directory:
+/// the session's leading metadata records carry none.
+const CWD_SCAN_LINES: usize = 64;
+
+/// The directory the session ran in, from the first of its records that names
+/// one. The project key cannot say: sanitizing a path loses which dashes were
+/// separators.
+pub fn cwd(file: &SessionFile) -> Option<PathBuf> {
+    use std::io::{BufRead, BufReader};
+    let reader = BufReader::new(std::fs::File::open(&file.path).ok()?);
+    reader
+        .lines()
+        .take(CWD_SCAN_LINES)
+        .map_while(Result::ok)
+        .find_map(|line| {
+            let record: serde_json::Value = serde_json::from_str(&line).ok()?;
+            Some(PathBuf::from(record.get("cwd")?.as_str()?))
+        })
+}
+
 /// The stream for one of the session's tailed files: which [`Source`](super::Source) it is
 /// comes off the path.
 pub fn stream_for(file: &SessionFile) -> super::Stream {
