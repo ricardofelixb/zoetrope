@@ -37,6 +37,8 @@ pub struct Stream {
     root: Option<String>,
     /// First ordinal that is this thread's own.
     own_from: Option<u64>,
+    /// This file is the automatic reviewer's: it states nothing.
+    guardian: bool,
     /// For relativising paths in summaries.
     cwd: Option<String>,
     /// The cumulative output tokens last seen, so each `token_count` states
@@ -59,6 +61,9 @@ impl Stream {
 
     /// State what an already-parsed line says.
     pub fn push_line(&mut self, line: &Line) -> Option<Statement> {
+        if self.guardian {
+            return None;
+        }
         if let Payload::SessionMeta(meta) = &line.payload {
             if self.thread.is_some() {
                 // The parent's meta, replayed into a child. Not ours.
@@ -87,6 +92,10 @@ impl Stream {
 
     /// The first line: learn whose file this is, and state that agent.
     fn adopt(&mut self, meta: &SessionMeta, at: Option<DateTime<Utc>>) -> Option<Statement> {
+        if meta.is_guardian() {
+            self.guardian = true;
+            return None;
+        }
         let id = meta.id.clone()?;
         let root = if meta.is_root() {
             id.clone()
@@ -591,6 +600,17 @@ mod tests {
         let st = s.push(r#"{"timestamp":"2026-08-26T16:13:40.000Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"child said"}]}}"#).unwrap();
         assert_eq!(st.facts[0].agent.as_deref(), Some("c"));
         assert!(matches!(st.facts[0].kind, FactKind::Message(ref t) if t == "child said"));
+    }
+
+    /// Codex's automatic reviewer is a thread of its own in a rollout of its
+    /// own; none of it becomes a fact, whatever follows the first line.
+    #[test]
+    fn the_automatic_reviewer_states_nothing() {
+        let mut s = Stream::new();
+        assert!(s.push(r#"{"timestamp":"2026-10-01T10:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"g","session_id":"a","parent_thread_id":"a","source":{"subagent":{"other":"guardian"}},"thread_source":"guardian_review","originator":"codex-tui"}}"#).is_none());
+        // A replayed parent meta must not be adopted in its place.
+        assert!(s.push(r#"{"timestamp":"2026-10-01T10:00:01.000Z","ordinal":1,"type":"session_meta","payload":{"id":"a","session_id":"a","source":"cli","thread_source":"user"}}"#).is_none());
+        assert!(s.push(r#"{"timestamp":"2026-10-01T10:00:02.000Z","ordinal":2,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"outcome\":\"allow\"}"}]}}"#).is_none());
     }
 
     #[test]
