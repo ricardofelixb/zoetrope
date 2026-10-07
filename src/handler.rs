@@ -826,20 +826,21 @@ mod tests {
         let mut app = App::new("s".into(), Mode::Live);
         app.agents_only = true;
         app.on_send = Some("say {text}".into());
+        let app_node = || crate::ui::nodes::AgentNode {
+            title: "root".into(),
+            description: None,
+            said: None,
+            status: crate::state::session::AgentStatus::Running,
+            tool_count: 0,
+            last_tool: None,
+            output_tokens: 0,
+            interactive: false,
+        };
         let node = rataflow::Node::new(
             crate::state::session::MAIN_ID,
             (0.0, 0.0),
             (10.0, 5.0),
-            crate::ui::nodes::AgentNode {
-                title: "root".into(),
-                description: None,
-                said: None,
-                status: crate::state::session::AgentStatus::Running,
-                tool_count: 0,
-                last_tool: None,
-                output_tokens: 0,
-                interactive: false,
-            },
+            app_node(),
         );
         app.flow.add_node(node).unwrap();
         app.flow.select_node(crate::state::session::MAIN_ID);
@@ -847,6 +848,12 @@ mod tests {
         assert!(app.panel_agent().is_none());
         press(&mut app, KeyCode::Enter);
         assert!(app.draft.is_none());
+        // A conductor's card (a group) does have one.
+        let group = rataflow::Node::new("c1", (0.0, 20.0), (10.0, 5.0), app_node());
+        app.flow.add_node(group).unwrap();
+        app.flow.select_node("c1");
+        assert_eq!(app.panel_agent().as_deref(), Some("c1"));
+        app.flow.select_node(crate::state::session::MAIN_ID);
         app.agents_only = false;
         assert!(app.panel_agent().is_some(), "otherwise the root has one");
         press(&mut app, KeyCode::Char('t'));

@@ -71,6 +71,12 @@ pub struct SessionModel {
     /// EARLIER record than the call — this is the cross-record fallback for
     /// [`SpawnContext::reasoning`].
     last_reasoning: HashMap<String, String>,
+    /// The latest `Gone` and the latest `Declared` (with its title) of each
+    /// agent that has one. An agent is hidden while the first is the later (see
+    /// [`hidden`](Self::hidden)); both are the latest by time, so the fold stays
+    /// order-independent, and either may arrive before the agent exists.
+    gone: OrdMap<String, DateTime<Utc>>,
+    declared: OrdMap<String, (DateTime<Utc>, Option<String>)>,
 }
 
 /// A notable timeline event for the scrubber's log line: a prompt (era
@@ -123,6 +129,9 @@ pub enum EntryKind {
     Told,
     /// The agent's own words.
     Message,
+    /// The agent's turn ended. Carries no text: it dates the agent's final
+    /// report, its latest message at or before it.
+    Waiting,
 }
 
 /// One user prompt in the main transcript — an era boundary on the session's
@@ -362,6 +371,8 @@ impl SessionModel {
             prompts: Vector::new(),
             feed: OrdSet::new(),
             last_reasoning: HashMap::new(),
+            gone: OrdMap::new(),
+            declared: OrdMap::new(),
         }
     }
 
@@ -380,6 +391,9 @@ impl SessionModel {
         if let Some((agent_type, description)) = self.labels.get(id) {
             info.agent_type = agent_type.clone();
             info.description = description.clone();
+        }
+        if let Some((_, Some(title))) = self.declared.get(id) {
+            info.agent_type = Some(title.clone());
         }
         self.agents.insert(id.to_string(), info);
         self.spawn_order.push_back(id.to_string());
@@ -447,7 +461,11 @@ impl SessionModel {
         }
         let by_agent = !matches!(
             fact.kind,
-            FactKind::Label { .. } | FactKind::Ended(_) | FactKind::Told(_)
+            FactKind::Label { .. }
+                | FactKind::Ended(_)
+                | FactKind::Told(_)
+                | FactKind::Declared(_)
+                | FactKind::Gone
         );
         if by_agent {
             match &fact.kind {
@@ -495,15 +513,36 @@ impl SessionModel {
         structural
     }
 
+    /// Whether `id`, or anything it hangs under, was taken off the canvas: its
+    /// latest `Gone` is at or after its latest statement (or it was never
+    /// stated).
+    pub fn hidden(&self, id: &str) -> bool {
+        if self.gone.is_empty() {
+            return false;
+        }
+        let mut at = Some(id);
+        for _ in 0..32 {
+            let Some(a) = at else { return false };
+            if let Some(gone) = self.gone.get(a)
+                && self.declared.get(a).is_none_or(|(d, _)| gone >= d)
+            {
+                return true;
+            }
+            at = self.agents.get(a).and_then(|a| a.parent.as_deref());
+        }
+        false
+    }
+
     /// The per-kind half of [`apply_fact`](Self::apply_fact): the agent (if
     /// any) already exists and has been touched. Returns whether structure
     /// changed.
     fn fold_kind(&mut self, id: &str, fact: &Fact) -> bool {
         let mut structural = false;
         let entry = match &fact.kind {
-            FactKind::Prompt(text) => Some((EntryKind::Prompt, text)),
-            FactKind::Told(text) => Some((EntryKind::Told, text)),
-            FactKind::Message(text) => Some((EntryKind::Message, text)),
+            FactKind::Prompt(text) => Some((EntryKind::Prompt, text.clone())),
+            FactKind::Told(text) => Some((EntryKind::Told, text.clone())),
+            FactKind::Message(text) => Some((EntryKind::Message, text.clone())),
+            FactKind::Waiting => Some((EntryKind::Waiting, String::new())),
             _ => None,
         };
         if let Some((kind, text)) = entry {
@@ -511,7 +550,7 @@ impl SessionModel {
                 ts: fact.ts,
                 agent: id.to_string(),
                 kind,
-                text: text.clone(),
+                text,
             });
         }
         // A turn's end, and what starts the agent again: kept as the latest of
@@ -617,6 +656,25 @@ impl SessionModel {
                 }
             }
             FactKind::Prompt(_) | FactKind::Told(_) => {}
+            FactKind::Declared(title) => {
+                if let Some(ts) = fact.ts {
+                    let now = (ts, title.clone());
+                    if self.declared.get(id).is_none_or(|old| *old < now) {
+                        if let (Some(title), Some(a)) = (title, self.agents.get_mut(id)) {
+                            a.agent_type = Some(title.clone());
+                        }
+                        self.declared.insert(id.to_string(), now);
+                    }
+                }
+            }
+            FactKind::Gone => {
+                if let Some(ts) = fact.ts {
+                    self.gone
+                        .entry(id.to_string())
+                        .and_modify(|g| *g = (*g).max(ts))
+                        .or_insert(ts);
+                }
+            }
             FactKind::Message(text) | FactKind::Reasoning(text) => {
                 let said = Said {
                     excerpt: excerpt(text),
@@ -654,8 +712,11 @@ impl SessionModel {
             }
             // Provenance: why the agent this call spawns will exist. The
             // reasoning is the agent's latest text before the call.
-            FactKind::Spawn { call } => {
-                let reasoning = self.last_reasoning.get(id).cloned();
+            FactKind::Spawn { call, reason } => {
+                let reasoning = reason
+                    .as_deref()
+                    .map(excerpt)
+                    .or_else(|| self.last_reasoning.get(id).cloned());
                 self.spawn_context
                     .entry(call.clone())
                     .or_insert_with(|| SpawnContext {
@@ -946,14 +1007,18 @@ impl SessionModel {
         }
     }
 
-    /// Number of agents currently tracked.
+    /// Number of agents currently tracked, those taken off the canvas aside.
     pub fn agent_count(&self) -> usize {
-        self.agents.len()
+        self.agents.keys().filter(|id| !self.hidden(id)).count()
     }
 
-    /// Total tool calls across all agents.
+    /// Total tool calls across all agents, hidden ones aside.
     pub fn tool_count(&self) -> usize {
-        self.agents.values().map(|a| a.tool_calls.len()).sum()
+        self.agents
+            .iter()
+            .filter(|(id, _)| !self.hidden(id))
+            .map(|(_, a)| a.tool_calls.len())
+            .sum()
     }
 
     /// Agent ids in spawn order.
@@ -1194,7 +1259,10 @@ mod tests {
         m.apply_fact(&Fact {
             agent: Some(MAIN_ID.to_string()),
             ts: Some(ts("2026-06-05T10:05:00Z")),
-            kind: FactKind::Spawn { call: "s1".into() },
+            kind: FactKind::Spawn {
+                call: "s1".into(),
+                reason: None,
+            },
         });
 
         // No subagent is loaded here, so the spawning call ("s1") is the

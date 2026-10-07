@@ -7,9 +7,10 @@
 //! [`Member::rewrite`] into the job's namespace, and every tick's statements
 //! go out as one batch stamped with the job's id.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
 use crate::fact::{Fact, FactKind, Statement};
@@ -26,6 +27,9 @@ use super::{Flow, TailRequest, UiEvent};
 /// poll): finding an id sweeps every provider's sessions.
 const ID_RETRY_EVERY: u32 = 10;
 
+/// A manifest line about a key, as of its time: a removal when `true`.
+type Event = (Option<DateTime<Utc>>, bool);
+
 /// Everything one job's poll loop owns.
 pub(crate) struct JobFeed {
     manifest: PathBuf,
@@ -38,7 +42,10 @@ pub(crate) struct JobFeed {
     members: Vec<(Member, LiveSession)>,
     /// Sessions already in the tree, by provider and id, so a line naming one
     /// again (a resumed step) changes nothing.
-    claimed: HashSet<(Provider, String)>,
+    claimed: HashMap<(Provider, String), String>,
+    /// Every removal (`true`) and statement of each key, in the order read, to
+    /// apply to the sessions that join under it afterwards.
+    events: HashMap<String, Vec<Event>>,
     /// How many sessions each key has, so a second one becomes `key~2`.
     per_key: HashMap<String, usize>,
     ticks: u32,
@@ -52,7 +59,8 @@ impl JobFeed {
             announced: false,
             pending: Vec::new(),
             members: Vec::new(),
-            claimed: HashSet::new(),
+            claimed: HashMap::new(),
+            events: HashMap::new(),
             per_key: HashMap::new(),
             ticks: 0,
         }
@@ -72,7 +80,26 @@ impl JobFeed {
                             out.extend(job::header_statements(&header, &self.manifest));
                         }
                         Line::Header(_) => {}
-                        Line::Member(entry) => self.pending.push(entry),
+                        // Stated now, though its session may be found later.
+                        Line::Member(entry) => {
+                            self.declare(&entry.member, &entry, out);
+                            self.pending.push(entry);
+                        }
+                        Line::Group(group) => out.push(job::group_statement(&group)),
+                        Line::Gone(gone) => {
+                            // A member key covers every session run under it.
+                            for n in 2..=self.count(&gone.gone) {
+                                out.push(job::gone_statement(&job::Gone {
+                                    gone: root(&gone.gone, n),
+                                    ts: gone.ts,
+                                }));
+                            }
+                            self.events
+                                .entry(gone.gone.clone())
+                                .or_default()
+                                .push((Some(gone.ts), true));
+                            out.push(job::gone_statement(&gone));
+                        }
                         // To the member's latest session under that key.
                         Line::Told(told) => out.push(
                             Fact {
@@ -123,16 +150,39 @@ impl JobFeed {
 
     /// Add an opened session to the tree, unless it is in it already.
     fn join(&mut self, entry: &Entry, session: crate::provider::Session, out: &mut Vec<Statement>) {
-        if !self.claimed.insert((session.provider, session.id.clone())) {
+        let key = (session.provider, session.id.clone());
+        if self.claimed.contains_key(&key) {
             return;
         }
         let count = self.per_key.entry(entry.member.clone()).or_default();
         *count += 1;
         let member = Member::new(root(&entry.member, *count), entry);
+        self.claimed.insert(key, member.root.clone());
         out.push(member.birth());
         out.push(member.session(session.provider, &session.id));
+        for &(ts, gone) in self.events.get(&entry.member).into_iter().flatten() {
+            out.push(match ts {
+                Some(ts) if gone => job::gone_statement(&job::Gone {
+                    gone: member.root.clone(),
+                    ts,
+                }),
+                _ => job::redeclared(&member.root, ts),
+            });
+        }
         self.members
             .push((member, LiveSession::new(session, None, entry.provider)));
+    }
+
+    /// State every session under `key` as of the line `entry`, and keep it for
+    /// the sessions that join later.
+    fn declare(&mut self, key: &str, entry: &Entry, out: &mut Vec<Statement>) {
+        self.events
+            .entry(key.to_string())
+            .or_default()
+            .push((entry.ts, false));
+        for n in 1..=self.count(key) {
+            out.push(job::redeclared(&root(key, n), entry.ts));
+        }
     }
 
     /// How many sessions have joined under `key`.
@@ -465,7 +515,11 @@ mod tests {
                     continue;
                 }
                 Line::Member(entry) => entry,
-                Line::Told(_) => continue,
+                Line::Group(group) => {
+                    own.push(job::group_statement(&group));
+                    continue;
+                }
+                Line::Gone(_) | Line::Told(_) => continue,
             };
             let path = entry.path_from(manifest).unwrap();
             let session = open(&Target::Path(path), entry.provider).unwrap();
@@ -487,5 +541,123 @@ mod tests {
         }
         streams.insert(0, own);
         streams
+    }
+
+    /// A key's removal covers every session run under it, and only a manifest
+    /// line shows them again, not what the sessions go on writing.
+    #[test]
+    fn a_member_key_is_removed_and_shown_again_by_manifest_lines() {
+        let dir = temp_dir("gone");
+        let manifest = dir.join("gone.jsonl");
+        let (a, b) = (
+            "11111111-1111-1111-1111-111111111111.jsonl",
+            "22222222-2222-2222-2222-222222222222.jsonl",
+        );
+        append(&dir.join(a), &claude_line("one", 2));
+        append(&dir.join(b), &claude_line("two", 3));
+        append(&manifest, r#"{"zoe":"job","v":1,"id":"j"}"#);
+        let member = |path: &str, ts: &str| {
+            format!(r#"{{"member":"m","path":"{path}","ts":"2026-10-06T{ts}:00Z"}}"#)
+        };
+        append(&manifest, &member(a, "10:01"));
+        append(&manifest, &member(b, "10:02"));
+        append(&manifest, r#"{"gone":"m","ts":"2026-10-06T10:05:00Z"}"#);
+        // Session records written after the removal do not undo it.
+        append(&dir.join(a), &claude_line("later", 7));
+        let model = fold(&read_job(&manifest));
+        assert!(model.hidden("m") && model.hidden("m~2"));
+
+        // The same session named again later shows the key.
+        append(&manifest, &member(a, "10:10"));
+        let model = fold(&read_job(&manifest));
+        assert!(!model.hidden("m") && !model.hidden("m~2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every removal and statement of a key reaches the sessions that join
+    /// under it later, however late their line is read.
+    #[test]
+    fn late_sessions_see_every_removal_and_statement_of_their_key() {
+        let dir = temp_dir("late");
+        let manifest = dir.join("late.jsonl");
+        let (a, b) = (
+            "11111111-1111-1111-1111-111111111111.jsonl",
+            "22222222-2222-2222-2222-222222222222.jsonl",
+        );
+        append(&dir.join(a), &claude_line("one", 2));
+        append(&dir.join(b), &claude_line("two", 3));
+        append(&manifest, r#"{"zoe":"job","v":1,"id":"j"}"#);
+        let line = |path: &str, ts: &str| {
+            append(
+                &manifest,
+                &format!(r#"{{"member":"m","path":"{path}","ts":"2026-10-06T{ts}:00Z"}}"#),
+            );
+        };
+        let gone = |ts: &str| {
+            append(
+                &manifest,
+                &format!(r#"{{"gone":"m","ts":"2026-10-06T{ts}:00Z"}}"#),
+            );
+        };
+        line(a, "10:01");
+        gone("10:05");
+        line(a, "10:10");
+        // B's older line is read after the revival: it is shown too.
+        line(b, "10:02");
+        let model = fold(&read_job(&manifest));
+        assert!(!model.hidden("m") && !model.hidden("m~2"));
+
+        // Every removal counts: as of 10:06 both are hidden, and again after
+        // the second removal.
+        gone("10:15");
+        let statements = read_job(&manifest);
+        let until = |minute: u32| {
+            let cut = format!("2026-10-06T10:{minute:02}:00Z")
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .unwrap();
+            let kept: Vec<Statement> = statements
+                .iter()
+                .filter_map(|s| {
+                    let facts: Vec<Fact> = s
+                        .facts
+                        .iter()
+                        .filter(|f| f.ts.is_none_or(|t| t <= cut))
+                        .cloned()
+                        .collect();
+                    (!facts.is_empty()).then_some(Statement { at: s.at, facts })
+                })
+                .collect();
+            fold(&kept)
+        };
+        let early = until(6);
+        assert!(early.hidden("m") && early.hidden("m~2"));
+        let revived = until(11);
+        assert!(!revived.hidden("m") && !revived.hidden("m~2"));
+        let last = until(16);
+        assert!(last.hidden("m") && last.hidden("m~2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A line stating a member shows its key at once, whether or not the
+    /// session it names can be opened yet.
+    #[test]
+    fn a_pending_session_does_not_delay_a_revival() {
+        let dir = temp_dir("pending");
+        let manifest = dir.join("pending.jsonl");
+        let a = "11111111-1111-1111-1111-111111111111.jsonl";
+        append(&dir.join(a), &claude_line("one", 2));
+        append(&manifest, r#"{"zoe":"job","v":1,"id":"j"}"#);
+        append(
+            &manifest,
+            &format!(r#"{{"member":"m","path":"{a}","ts":"2026-10-06T10:01:00Z"}}"#),
+        );
+        append(&manifest, r#"{"gone":"m","ts":"2026-10-06T10:05:00Z"}"#);
+        append(
+            &manifest,
+            r#"{"member":"m","path":"missing.jsonl","provider":"claude","ts":"2026-10-06T10:10:00Z"}"#,
+        );
+        let model = fold(&read_job(&manifest));
+        assert!(model.agent("m").is_some() && !model.hidden("m"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

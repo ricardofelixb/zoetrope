@@ -117,15 +117,32 @@ const LOCAL_V_GAP: f64 = 5.0;
 /// `Sugiyama::vertical()` pass (which overwrites the local placements). When
 /// false — Manual camera: the user owns the view — nothing existing moves;
 /// the caller tracks dirtiness and relayouts when the camera re-engages.
-/// Returns `true` if structure changed.
+/// Agents the model hides (and what hangs under them) are left off the canvas,
+/// and taken off it if they were there. Returns `true` if structure changed.
 pub fn sync(flow: &mut AgentFlow, model: &SessionModel, relayout: bool) -> bool {
     let mut structural = false;
+
+    let hidden: std::collections::HashSet<&String> = model
+        .spawn_order
+        .iter()
+        .filter(|id| model.hidden(id))
+        .collect();
+    let drawn: Vec<String> = hidden
+        .iter()
+        .filter(|id| flow.node(id).is_some())
+        .map(|id| (*id).clone())
+        .collect();
+    structural |= !drawn.is_empty();
+    remove_agents(flow, &drawn);
 
     // First pass: nodes (must exist before their edges).
     for id in &model.spawn_order {
         let Some(info) = model.agent(id) else {
             continue;
         };
+        if hidden.contains(id) {
+            continue;
+        }
         if let Some(existing) = flow.node_content_mut(id) {
             // Steady state: only rebuild (String clones) when something
             // visible changed — the per-second status tick and per-batch
@@ -187,6 +204,9 @@ pub fn sync(flow: &mut AgentFlow, model: &SessionModel, relayout: bool) -> bool 
         let Some(info) = model.agent(id) else {
             continue;
         };
+        if hidden.contains(id) {
+            continue;
+        }
         let Some(parent) = &info.parent else {
             continue;
         };
@@ -451,5 +471,55 @@ mod tests {
             text.contains("guide"),
             "subagent card title missing from render:\n{text}"
         );
+    }
+
+    #[test]
+    fn a_hidden_agent_leaves_the_canvas_with_its_subtree_and_returns() {
+        use crate::fact::{Fact, FactKind};
+        let t = |m: u32| {
+            chrono::DateTime::parse_from_rfc3339(&format!("2026-10-06T10:{m:02}:00Z"))
+                .ok()
+                .map(|d| d.with_timezone(&chrono::Utc))
+        };
+        let agent = |id: &str, kind, parent: &str, m| Fact {
+            agent: Some(id.into()),
+            ts: t(m),
+            kind: FactKind::Agent {
+                kind,
+                parent: Some(parent.into()),
+                agent_type: None,
+                description: None,
+                spawned_by: None,
+                interactive: false,
+            },
+        };
+        let mut model = model_with_subagent();
+        model.apply_fact(&agent("g", AgentKind::Group, "main", 1));
+        model.apply_fact(&agent("m", AgentKind::Subagent, "g", 1));
+        let mut flow = new_flow();
+        sync(&mut flow, &model, false);
+        flow.select_node("m");
+        assert!(flow.node("m").is_some());
+
+        let gone = Fact {
+            agent: Some("g".into()),
+            ts: t(2),
+            kind: FactKind::Gone,
+        };
+        model.apply_fact(&gone);
+        assert!(sync(&mut flow, &model, false));
+        assert!(flow.node("g").is_none() && flow.node("m").is_none());
+        assert!(flow.node("abc123").is_some(), "the rest stays");
+        assert_eq!(flow.selected_nodes().count(), 0, "deselected");
+        assert_eq!(model.agent_count(), 2);
+
+        model.apply_fact(&Fact {
+            agent: Some("g".into()),
+            ts: t(3),
+            kind: FactKind::Declared(None),
+        });
+        assert!(sync(&mut flow, &model, false));
+        assert!(flow.node("g").is_some() && flow.node("m").is_some());
+        assert_eq!(model.agent_count(), 4);
     }
 }
