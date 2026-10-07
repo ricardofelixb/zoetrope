@@ -372,15 +372,37 @@ impl SessionModel {
         let Some(id) = fact.agent.as_deref() else {
             return false;
         };
+        // A group's own birth names where it hangs. A group born from its first
+        // child defaults to the root, which is wrong once several sessions share
+        // one tree (a job, `crate::job`): each member states its groups' parent.
+        // It never retypes or reparents an agent that spoke for itself.
+        if let FactKind::Agent {
+            kind: AgentKind::Group,
+            parent,
+            ..
+        } = &fact.kind
+        {
+            let created = self.ensure_agent(id, AgentKind::Group);
+            let mut moved = false;
+            if let Some(group) = self.agents.get_mut(id)
+                && group.kind == AgentKind::Group
+                && group.parent != *parent
+            {
+                group.parent = parent.clone();
+                moved = true;
+            }
+            return created || moved;
+        }
         let by_agent = !matches!(fact.kind, FactKind::Label { .. } | FactKind::Ended(_));
         if by_agent {
             match &fact.kind {
                 FactKind::Agent { kind, parent, .. } => {
                     // A parent named before it has spoken is a group: the only
                     // node born from its first child rather than its own record.
-                    // No format seen so far names a parent that later speaks
-                    // for itself (Claude's groups never do); if one appears,
-                    // this is where the placeholder's kind would be revisited.
+                    // Claude's groups never speak for themselves, but a parent
+                    // that does (a Codex thread read after its child, a job's
+                    // member read after its subagent) is what it then says it
+                    // is, so the result does not depend on which came first.
                     if let Some(p) = parent
                         && !self.agents.contains_key(p)
                     {
@@ -390,6 +412,16 @@ impl SessionModel {
                         }
                     }
                     structural |= self.ensure_agent(id, *kind);
+                    if let Some(a) = self.agents.get_mut(id)
+                        && a.kind == AgentKind::Group
+                        && *kind != AgentKind::Group
+                    {
+                        a.kind = *kind;
+                        if !a.terminal {
+                            a.status = AgentStatus::Running;
+                        }
+                        structural = true;
+                    }
                 }
                 _ => structural |= self.ensure_agent(id, AgentKind::Subagent),
             }
@@ -488,8 +520,17 @@ impl SessionModel {
                 // Idempotent AND order-independent: a re-applied fact is a dup
                 // wherever it lands, not only when it's the trailing prompt. A
                 // genuine repeat at a *different* ts is kept.
+                // Kept in time order, which one file's arrival order already
+                // is; a spine fed by several files (a job's members) is not.
                 if !self.prompts.iter().any(|p| p.excerpt == ex && p.ts == ts) {
-                    self.prompts.push_back(PromptInfo { excerpt: ex, ts });
+                    let at = ts
+                        .and_then(|t| {
+                            self.prompts
+                                .iter()
+                                .position(|p| p.ts.is_some_and(|pt| pt > t))
+                        })
+                        .unwrap_or(self.prompts.len());
+                    self.prompts.insert(at, PromptInfo { excerpt: ex, ts });
                 }
             }
             FactKind::Prompt(_) => {}
