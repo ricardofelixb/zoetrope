@@ -92,6 +92,16 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
+    /// Codex's automatic reviewer, run as a thread of its own. Machinery,
+    /// not an agent the user started, so nothing of it is stated.
+    pub fn is_guardian(&self) -> bool {
+        self.thread_source.as_deref() == Some("guardian_review")
+            || matches!(
+                &self.source,
+                Source::Spawn { subagent: SubagentSource::Spawn { other: Some(o), .. } } if o == "guardian"
+            )
+    }
+
     pub fn is_root(&self) -> bool {
         match self.thread_source.as_deref() {
             Some("subagent") => false,
@@ -161,6 +171,8 @@ pub enum SubagentSource {
     Spawn {
         #[serde(default)]
         thread_spawn: ThreadSpawn,
+        /// `"guardian"` on the automatic reviewer's thread.
+        other: Option<String>,
     },
     Kind(String),
     #[default]
@@ -171,7 +183,7 @@ impl SubagentSource {
     /// The spawn detail, when this shape carries any.
     fn spawn(&self) -> Option<&ThreadSpawn> {
         match self {
-            Self::Spawn { thread_spawn } => Some(thread_spawn),
+            Self::Spawn { thread_spawn, .. } => Some(thread_spawn),
             _ => None,
         }
     }

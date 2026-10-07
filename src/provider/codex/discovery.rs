@@ -142,7 +142,10 @@ pub fn session_rollouts(root: &Path) -> Vec<(PathBuf, SessionMeta)> {
         let Some(meta) = read_meta(&path) else {
             continue;
         };
-        if !meta.is_root() && meta.session_id.as_deref() == Some(root_id.as_str()) {
+        if !meta.is_guardian()
+            && !meta.is_root()
+            && meta.session_id.as_deref() == Some(root_id.as_str())
+        {
             out.push((path, meta));
         }
     }
@@ -220,6 +223,9 @@ pub fn classify_head(path: &Path, head: &str, modified: SystemTime) -> Option<Se
 }
 
 fn from_meta(path: &Path, meta: &SessionMeta, modified: SystemTime) -> Option<SessionFile> {
+    if meta.is_guardian() {
+        return None;
+    }
     let id = meta.id.clone()?;
     let (session, role) = if meta.is_root() {
         (id, FileRole::Root)
@@ -302,6 +308,24 @@ mod tests {
         // point): nothing after that day is looked at.
         root.modified = std::time::UNIX_EPOCH;
         assert!(related_paths(&root).is_empty());
+    }
+
+    /// The automatic reviewer's rollout is not a session file, whichever of
+    /// the two markers the format states, so it is never a folder's newest.
+    #[test]
+    fn the_automatic_reviewer_is_not_a_session_file() {
+        let path = Path::new(
+            "/x/sessions/2026/10/01/rollout-2026-10-01T10-00-00-01a1184d-2322-7000-8000-000000000000.jsonl",
+        );
+        let at = std::time::UNIX_EPOCH;
+        let both = r#"{"type":"session_meta","payload":{"id":"g","session_id":"a","parent_thread_id":"a","source":{"subagent":{"other":"guardian"}},"thread_source":"guardian_review"}}"#;
+        let by_source = r#"{"type":"session_meta","payload":{"id":"g","session_id":"a","parent_thread_id":"a","source":{"subagent":{"other":"guardian"}},"thread_source":"subagent"}}"#;
+        let by_thread = r#"{"type":"session_meta","payload":{"id":"g","session_id":"a","source":"cli","thread_source":"guardian_review"}}"#;
+        let root = r#"{"type":"session_meta","payload":{"id":"a","session_id":"a","source":"cli","thread_source":"user"}}"#;
+        for head in [both, by_source, by_thread] {
+            assert!(classify_head(path, head, at).is_none(), "{head}");
+        }
+        assert!(classify_head(path, root, at).is_some());
     }
 
     #[test]
