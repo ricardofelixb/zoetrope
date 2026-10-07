@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(said.len(), 1, "exactly the appended line is stated");
         assert_eq!(said[0].facts[0].agent.as_deref(), Some("main"));
         assert!(
-            matches!(&said[0].facts[0].kind, crate::fact::FactKind::Reasoning(t) if t == "after the replay")
+            matches!(&said[0].facts[0].kind, crate::fact::FactKind::Message(t) if t == "after the replay")
         );
 
         let _ = std::fs::remove_dir_all(&dir);

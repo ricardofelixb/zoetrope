@@ -368,6 +368,12 @@ pub fn zoetrope_session_file(path: String, head: String) -> String {
 /// to the flow.
 fn handle_key(key: RKeyEvent, app: &mut App) {
     match key.code {
+        // The panel's prompts, folded or whole.
+        RKeyCode::Char('x') | RKeyCode::Char('X') if app.selected_agent_id().is_some() => {
+            app.whole_prompts = !app.whole_prompts;
+            return;
+        }
+
         // Transport (DVR).
         RKeyCode::Char(' ') => return app.toggle_play_pause(),
         RKeyCode::Char('[') => return app.seek_prompt(false),

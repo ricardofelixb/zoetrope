@@ -80,9 +80,16 @@ pub enum FactKind {
     /// A human prompt on this agent's thread. An era boundary. Providers emit it
     /// only for text a person typed; injected text is not a prompt.
     Prompt(String),
-    /// Assistant text or thinking. The core keeps the latest per agent so a
-    /// following spawn can carry its stated reason.
+    /// What the agent said: its visible text, the words a person reads.
+    Message(String),
+    /// The agent's thinking, which is not said to anyone. With messages, the
+    /// core keeps the latest per agent so a following spawn can carry its
+    /// stated reason.
     Reasoning(String),
+    /// A message a person sent the agent while it ran, as the orchestrator
+    /// that runs it recorded it. The agent's session also holds it, as one of
+    /// its prompts, inside whatever the orchestrator wrapped it in.
+    Told(String),
     /// A tool call began. `summary` is the provider's one-line rendering of the
     /// input (a command, a path), because what makes a good summary is a
     /// property of the tool vocabulary, which only the provider knows.
@@ -160,7 +167,9 @@ impl FactKind {
             FactKind::Model(_) => "Model",
             FactKind::Tokens { .. } => "Tokens",
             FactKind::Prompt(_) => "Prompt",
+            FactKind::Message(_) => "Message",
             FactKind::Reasoning(_) => "Reasoning",
+            FactKind::Told(_) => "Told",
             FactKind::ToolStart { .. } => "ToolStart",
             FactKind::ToolEnd { .. } => "ToolEnd",
             FactKind::Spawn { .. } => "Spawn",

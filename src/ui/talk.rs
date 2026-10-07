@@ -1,0 +1,537 @@
+//! An agent's conversation, as the detail panel shows it: what it was asked,
+//! what a person told it while it ran, and what it said, with the agents it
+//! spawned indented under it. The root of a session, or a job, shows everyone's.
+//! Its tool calls are one line, see [`tools`].
+
+use std::collections::HashSet;
+
+use chrono::{DateTime, Utc};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+
+use crate::state::session::{
+    AgentKind, AgentStatus, Entry, EntryKind, MAIN_ID, SessionModel, ToolState,
+};
+use crate::ui::{truncate, wrap};
+
+/// Wrapped lines of a prompt shown before it folds; `x` shows prompts whole.
+const PROMPT_LINES: usize = 3;
+/// The time column, `HH:MM:SS` and two spaces, which bodies are indented past.
+const TIME_COLS: usize = 10;
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// What the panel calls an agent: the name its session or its spawner gave it.
+fn name(model: &SessionModel, id: &str) -> String {
+    model
+        .agent(id)
+        .and_then(|a| a.agent_type.clone().or_else(|| a.description.clone()))
+        .unwrap_or_else(|| id.to_string())
+}
+
+/// One thing the conversation shows: an entry, or an agent starting (one
+/// spawned by another, which has no prompt of its own in the format).
+enum Item<'a> {
+    Entry(&'a Entry),
+    Started(&'a str, Option<DateTime<Utc>>),
+}
+
+impl Item<'_> {
+    fn agent(&self) -> &str {
+        match self {
+            Item::Entry(e) => &e.agent,
+            Item::Started(id, _) => id,
+        }
+    }
+
+    fn ts(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Item::Entry(e) => e.ts,
+            Item::Started(_, ts) => *ts,
+        }
+    }
+}
+
+/// Every line of `scope`'s conversation, wrapped to `width`; `whole` shows long
+/// prompts unfolded.
+pub(crate) fn lines(
+    model: &SessionModel,
+    scope: &str,
+    width: usize,
+    whole: bool,
+    palette: &rataflow::Palette,
+) -> Vec<Line<'static>> {
+    let job = crate::job::is_job_id(&model.session_id);
+    let base = depth(model, scope) + usize::from(job && scope == MAIN_ID);
+    let subtle = Style::default().fg(palette.subtle);
+    let mut out = Vec::new();
+    for item in items(model, scope) {
+        let id = item.agent();
+        let depth = depth(model, id).saturating_sub(base);
+        let indent = TIME_COLS + 2 * depth;
+        let text_w = width.saturating_sub(indent + 1).max(8);
+        let time = item.ts().map_or_else(
+            || " ".repeat(TIME_COLS),
+            |t| format!("{}  ", t.with_timezone(&chrono::Local).format("%H:%M:%S")),
+        );
+        let who = name(model, id);
+        let (header, head_style, body, body_style, fold) = match item {
+            Item::Entry(e) => match e.kind {
+                EntryKind::Prompt if job && id == MAIN_ID => {
+                    ("task".to_string(), subtle, e.text.as_str(), subtle, true)
+                }
+                EntryKind::Prompt => {
+                    let from = if job { "conductor" } else { "you" };
+                    (
+                        format!("{from} → {who}"),
+                        subtle,
+                        e.text.as_str(),
+                        subtle,
+                        true,
+                    )
+                }
+                EntryKind::Told => (
+                    format!("you → {who}"),
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                    e.text.as_str(),
+                    Style::default().fg(palette.accent),
+                    false,
+                ),
+                EntryKind::Message => (
+                    who,
+                    Style::default()
+                        .fg(palette.text)
+                        .add_modifier(Modifier::BOLD),
+                    e.text.as_str(),
+                    Style::default().fg(palette.text),
+                    false,
+                ),
+            },
+            Item::Started(..) => {
+                let about = model.agent(id).and_then(|a| a.description.clone());
+                let head = match about {
+                    Some(about) if !about.is_empty() && about != who => {
+                        format!("{who} started · {about}")
+                    }
+                    _ => format!("{who} started"),
+                };
+                (head, subtle, "", subtle, false)
+            }
+        };
+        if !out.is_empty() {
+            out.push(Line::default());
+        }
+        out.push(Line::from(vec![
+            Span::styled(time, subtle),
+            Span::raw(" ".repeat(2 * depth)),
+            Span::styled(truncate(&header, width.saturating_sub(indent)), head_style),
+        ]));
+
+        let mut wrapped: Vec<String> = Vec::new();
+        for para in plain(body).lines() {
+            if para.trim().is_empty() {
+                wrapped.push(String::new());
+            } else {
+                wrapped.extend(wrap(para, text_w, usize::MAX));
+            }
+        }
+        while wrapped.last().is_some_and(String::is_empty) {
+            wrapped.pop();
+        }
+        let hidden = if fold && !whole {
+            wrapped.len().saturating_sub(PROMPT_LINES)
+        } else {
+            0
+        };
+        wrapped.truncate(wrapped.len() - hidden);
+        while hidden > 0 && wrapped.last().is_some_and(String::is_empty) {
+            wrapped.pop();
+        }
+        let margin = " ".repeat(indent);
+        for text in wrapped {
+            out.push(Line::from(vec![
+                Span::raw(margin.clone()),
+                Span::styled(text, body_style),
+            ]));
+        }
+        if hidden > 0 {
+            out.push(Line::from(vec![
+                Span::raw(margin.clone()),
+                Span::styled(format!("… {hidden} more lines · x"), subtle),
+            ]));
+        }
+    }
+    out
+}
+
+/// Whether `id` is `scope` or hangs somewhere below it.
+fn within(model: &SessionModel, id: &str, scope: &str) -> bool {
+    let mut at = Some(id.to_string());
+    for _ in 0..32 {
+        match at {
+            Some(a) if a == scope => return true,
+            Some(a) => at = model.agent(&a).and_then(|a| a.parent.clone()),
+            None => return false,
+        }
+    }
+    false
+}
+
+/// What the conversation shows, in time order. A job's root repeats each
+/// member's prompts as its own chapters, and a message told while an agent ran
+/// is in its session as a prompt that starts with it: neither is shown twice.
+fn items<'a>(model: &'a SessionModel, scope: &str) -> Vec<Item<'a>> {
+    let job = crate::job::is_job_id(&model.session_id);
+    let feed: Vec<&Entry> = model
+        .feed()
+        .filter(|e| within(model, &e.agent, scope))
+        .collect();
+    let member_prompts: HashSet<(Option<DateTime<Utc>>, &str)> = feed
+        .iter()
+        .filter(|e| e.kind == EntryKind::Prompt && e.agent != MAIN_ID)
+        .map(|e| (e.ts, e.text.as_str()))
+        .collect();
+    let told: Vec<&Entry> = feed
+        .iter()
+        .copied()
+        .filter(|e| e.kind == EntryKind::Told)
+        .collect();
+    let prompted: HashSet<&str> = feed
+        .iter()
+        .filter(|e| e.kind != EntryKind::Message)
+        .map(|e| e.agent.as_str())
+        .collect();
+    let mut items: Vec<Item> = feed
+        .iter()
+        .copied()
+        .filter(|e| {
+            e.kind != EntryKind::Prompt
+                || !(job && e.agent == MAIN_ID && member_prompts.contains(&(e.ts, e.text.as_str())))
+                    && !told
+                        .iter()
+                        .any(|t| t.agent == e.agent && e.text.starts_with(t.text.as_str()))
+        })
+        .map(Item::Entry)
+        .collect();
+    for id in model.spawn_order() {
+        let Some(agent) = model.agent(id) else {
+            continue;
+        };
+        if id != MAIN_ID
+            && agent.kind == AgentKind::Subagent
+            && !prompted.contains(id)
+            && within(model, id, scope)
+        {
+            items.push(Item::Started(id, agent.first_ts));
+        }
+    }
+    items.sort_by_key(Item::ts);
+    items
+}
+
+/// How far below the root an agent hangs.
+fn depth(model: &SessionModel, id: &str) -> usize {
+    let mut depth = 0;
+    let mut at = model.agent(id).and_then(|a| a.parent.clone());
+    while let Some(parent) = at {
+        depth += 1;
+        if depth > 32 {
+            break;
+        }
+        at = model.agent(&parent).and_then(|a| a.parent.clone());
+    }
+    depth
+}
+
+/// All of `scope`'s tool calls, its subagents' included, as one line: the call
+/// in flight, animated, while one runs; the count once none does. `None` before
+/// the first call.
+pub(crate) fn tools(
+    model: &SessionModel,
+    scope: &str,
+    width: usize,
+    palette: &rataflow::Palette,
+) -> Option<Line<'static>> {
+    let mut count = 0usize;
+    let mut failed = 0usize;
+    let mut running: Option<&crate::state::session::ToolCallInfo> = None;
+    for id in model.spawn_order().filter(|id| within(model, id, scope)) {
+        let Some(agent) = model.agent(id) else {
+            continue;
+        };
+        for call in agent.tool_calls() {
+            count += 1;
+            failed += usize::from(call.state == ToolState::Err);
+            // A call still pending in an agent that has stopped never ends.
+            if call.state == ToolState::Pending
+                && agent.status == AgentStatus::Running
+                && running.is_none_or(|r| r.ts <= call.ts)
+            {
+                running = Some(call);
+            }
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let subtle = Style::default().fg(palette.subtle);
+    let total = if count == 1 {
+        "1 tool".to_string()
+    } else {
+        format!("{count} tools")
+    };
+    let mut spans = Vec::new();
+    if let Some(call) = running {
+        let frame = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() / 80) as usize;
+        spans.push(Span::styled(
+            format!("{} ", SPINNER[frame % SPINNER.len()]),
+            Style::default().fg(palette.accent),
+        ));
+        let what = describe(&call.name, call.summary.as_deref());
+        let room = width.saturating_sub(total.len() + 16);
+        spans.push(Span::styled(
+            truncate(&what, room),
+            Style::default().fg(palette.text),
+        ));
+        spans.push(Span::styled(format!(" · {total}"), subtle));
+    } else {
+        spans.push(Span::styled(format!("✓ {total}"), subtle));
+    }
+    if failed > 0 {
+        spans.push(Span::styled(
+            format!(" · ✗ {failed}"),
+            Style::default().fg(palette.error),
+        ));
+    }
+    Some(Line::from(spans))
+}
+
+/// A call as a verb and its object: `run cargo test`, `edit feed.rs`.
+fn describe(tool: &str, summary: Option<&str>) -> String {
+    // Codex runs its tools from one `exec` program, which its summary names as
+    // `tool: argument` unless the program runs a command.
+    if tool == "exec" {
+        return match summary.and_then(|s| s.split_once(": ")) {
+            Some((inner, rest)) if !inner.contains(' ') => format!("{} {rest}", verb(inner)),
+            _ => format!("run {}", summary.unwrap_or_default()),
+        };
+    }
+    match summary {
+        Some(s) => format!("{} {s}", verb(tool)),
+        None => verb(tool),
+    }
+}
+
+/// A tool's name as the verb of a line: `run`, `read`, `edit`, `search`, or its
+/// own name for the rest.
+fn verb(tool: &str) -> String {
+    match tool {
+        "Bash" | "exec_command" | "shell" | "local_shell" | "PowerShell" => "run",
+        "Read" | "NotebookRead" => "read",
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "apply_patch" => "edit",
+        "Grep" | "Glob" | "web_search" | "WebSearch" => "search",
+        "WebFetch" => "fetch",
+        other => return other.to_lowercase(),
+    }
+    .to_string()
+}
+
+/// Markdown as it reads: a link as its text, emphasis without its stars.
+fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let link = rest[open..].find("](").and_then(|mid| {
+            let close = rest[open + mid..].find(')')?;
+            Some((open + mid, open + mid + close))
+        });
+        match link {
+            Some((mid, close)) if !rest[open + 1..mid].contains(['[', '\n']) => {
+                out.push_str(&rest[..open]);
+                out.push_str(&rest[open + 1..mid]);
+                rest = &rest[close + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..=open]);
+                rest = &rest[open + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out.replace("**", "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fact::{Fact, FactKind, Outcome};
+
+    fn at(minute: u32) -> Option<DateTime<Utc>> {
+        Some(
+            DateTime::parse_from_rfc3339(&format!("2026-10-06T10:{minute:02}:00Z"))
+                .unwrap()
+                .with_timezone(&Utc),
+        )
+    }
+
+    fn apply(model: &mut SessionModel, agent: &str, minute: u32, kind: FactKind) {
+        model.apply_fact(&Fact {
+            agent: Some(agent.into()),
+            ts: at(minute),
+            kind,
+        });
+    }
+
+    fn text(lines: impl IntoIterator<Item = Line<'static>>) -> String {
+        lines
+            .into_iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
+    }
+
+    fn job() -> SessionModel {
+        let mut model = SessionModel::new("job:j".into());
+        apply(
+            &mut model,
+            MAIN_ID,
+            0,
+            FactKind::Prompt("Fix the bug".into()),
+        );
+        for member in ["review", "plan"] {
+            let birth = FactKind::Agent {
+                kind: AgentKind::Subagent,
+                parent: Some(MAIN_ID.into()),
+                agent_type: Some(format!("{member}: someone")),
+                description: None,
+                spawned_by: None,
+                interactive: false,
+            };
+            apply(&mut model, member, 1, birth);
+        }
+        let brief = "Review this change.\none\ntwo\nthree\nfour";
+        apply(&mut model, "review", 1, FactKind::Prompt(brief.into()));
+        apply(&mut model, MAIN_ID, 1, FactKind::Prompt(brief.into()));
+        apply(
+            &mut model,
+            "plan",
+            1,
+            FactKind::Message("Here is the plan.".into()),
+        );
+        let call = |name: &str, summary: &str| FactKind::ToolStart {
+            call: format!("c-{summary}"),
+            name: name.into(),
+            summary: Some(summary.into()),
+        };
+        apply(&mut model, "review", 2, call("Bash", "git diff"));
+        apply(
+            &mut model,
+            "review",
+            2,
+            FactKind::ToolEnd {
+                call: "c-git diff".into(),
+                outcome: Outcome::Err,
+            },
+        );
+        apply(
+            &mut model,
+            "review",
+            3,
+            FactKind::Told("that finding is intended".into()),
+        );
+        let delivered = "that finding is intended\n\n(A message from the user.)";
+        apply(&mut model, "review", 3, FactKind::Prompt(delivered.into()));
+        apply(
+            &mut model,
+            "review",
+            4,
+            FactKind::Message("VERDICT: **clean**".into()),
+        );
+        apply(
+            &mut model,
+            "review",
+            5,
+            call("exec", "exec_command: cargo test"),
+        );
+        model
+    }
+
+    /// A member's panel: its brief (folded), what the user told it and what it
+    /// said, each once; nothing of the other member's.
+    #[test]
+    fn a_member_reads_as_its_conversation() {
+        let model = job();
+        let shown = text(lines(
+            &model,
+            "review",
+            100,
+            false,
+            &rataflow::Palette::DARK,
+        ));
+        assert_eq!(
+            shown.matches("conductor → review: someone").count(),
+            1,
+            "{shown}"
+        );
+        assert!(shown.contains("… 2 more lines · x"), "{shown}");
+        assert!(shown.contains("you → review: someone"), "{shown}");
+        assert_eq!(
+            shown.matches("that finding is intended").count(),
+            1,
+            "{shown}"
+        );
+        assert!(shown.contains("VERDICT: clean"), "{shown}");
+        assert!(
+            !shown.contains("Here is the plan") && !shown.contains("Fix the bug"),
+            "{shown}"
+        );
+        assert_eq!(model.agent_count(), 3, "told makes no agent");
+    }
+
+    /// The job's root shows everyone's, and its own copy of a prompt once.
+    #[test]
+    fn the_root_reads_as_the_whole_job() {
+        let shown = text(lines(&job(), MAIN_ID, 100, true, &rataflow::Palette::DARK));
+        assert!(
+            shown.contains("task\n") && shown.contains("Fix the bug"),
+            "{shown}"
+        );
+        assert_eq!(shown.matches("Review this change.").count(), 1, "{shown}");
+        assert!(
+            shown.contains("four") && shown.contains("Here is the plan."),
+            "{shown}"
+        );
+    }
+
+    /// Every tool call is one line: the one in flight while it runs.
+    #[test]
+    fn all_the_tools_are_one_line() {
+        let model = job();
+        let line = |scope| text(tools(&model, scope, 100, &rataflow::Palette::DARK));
+        let running = line("review");
+        assert!(
+            running.ends_with("run cargo test · 2 tools · ✗ 1\n"),
+            "{running}"
+        );
+        assert!(SPINNER.iter().any(|s| running.starts_with(s)), "{running}");
+        assert_eq!(line(MAIN_ID), running, "the root counts its members'");
+        assert_eq!(line("plan"), "", "no calls, no line");
+    }
+
+    #[test]
+    fn markdown_reads_plain() {
+        assert_eq!(
+            plain("see [run.py:3](C:/r/run.py:3) **now**"),
+            "see run.py:3 now"
+        );
+        assert_eq!(plain("a [b] c [d](e"), "a [b] c [d](e");
+    }
+}

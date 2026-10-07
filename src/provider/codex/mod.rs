@@ -173,7 +173,7 @@ impl Stream {
                         if m.role.as_deref() == Some("assistant") {
                             let text = m.text();
                             if !text.trim().is_empty() {
-                                out.push(by(FactKind::Reasoning(text)));
+                                out.push(by(FactKind::Message(text)));
                             }
                         }
                     }
@@ -462,7 +462,11 @@ fn summarize_function(name: &str, fc: &wire::FunctionCall) -> Option<String> {
 /// call: for `exec_command` that is the command itself, for anything else
 /// the tool's name and its first string argument. Otherwise the first line.
 fn summarize_program(program: &str) -> String {
-    if let Some(cmd) = json_string_after(program, "\"cmd\":\"") {
+    // A JSON key, or the bare key of a JavaScript object literal, which is how
+    // Codex writes it: `tools.exec_command({cmd:"cargo test"})`.
+    if let Some(cmd) =
+        json_string_after(program, "\"cmd\":\"").or_else(|| json_string_after(program, "{cmd:\""))
+    {
         return truncate_summary(&cmd);
     }
     // A patch program carries the whole diff before the call that applies
@@ -583,7 +587,7 @@ mod tests {
         // The child's own record.
         let st = s.push(r#"{"timestamp":"2026-08-26T16:13:40.000Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"child said"}]}}"#).unwrap();
         assert_eq!(st.facts[0].agent.as_deref(), Some("c"));
-        assert!(matches!(st.facts[0].kind, FactKind::Reasoning(ref t) if t == "child said"));
+        assert!(matches!(st.facts[0].kind, FactKind::Message(ref t) if t == "child said"));
     }
 
     #[test]
@@ -596,6 +600,16 @@ mod tests {
         ));
         assert_eq!(st.facts[0].agent.as_deref(), Some("main"));
         assert_eq!(st.facts.iter().filter(|f| f.is_session_meta()).count(), 3);
+    }
+
+    #[test]
+    fn an_exec_command_is_its_command_with_either_kind_of_key() {
+        let bare = r#"text(await tools.exec_command({cmd:"Start-Sleep 8; echo one","max_output_tokens":2000}))"#;
+        assert_eq!(summarize_program(bare), "Start-Sleep 8; echo one");
+        assert_eq!(
+            summarize_program(r#"tools.exec_command({"cmd":"ls"})"#),
+            "ls"
+        );
     }
 
     #[test]
