@@ -218,7 +218,13 @@ fn render_header(frame: &mut Frame, area: Rect, agent: &AgentInfo, palette: &rat
         bg.fg(palette.muted),
     )));
 
-    // Description (wrapped) on the remaining rows.
+    // The latest message, then the description, wrapped on the remaining rows.
+    if let Some(said) = &agent.said {
+        lines.push(Line::from(Span::styled(
+            format!("› {}", said.excerpt),
+            bg.fg(palette.text),
+        )));
+    }
     if let Some(desc) = agent.description.as_ref().filter(|d| !d.is_empty()) {
         lines.push(Line::from(Span::styled(
             desc.as_str(),

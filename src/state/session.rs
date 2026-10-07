@@ -87,6 +87,18 @@ pub enum LogKind {
     Prompt,
     Spawn,
     Failure,
+    /// What an agent said: its latest text or thinking.
+    Message,
+}
+
+/// An agent's latest message: what it last told the user, or thought, while
+/// working. Its status update.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Said {
+    /// One-line excerpt of the message.
+    pub excerpt: String,
+    /// When the message was recorded.
+    pub ts: Option<DateTime<Utc>>,
 }
 
 /// One user prompt in the main transcript — an era boundary on the session's
@@ -220,6 +232,8 @@ pub struct AgentInfo {
     tool_index: HashMap<String, usize>,
     /// Summed `usage.output_tokens`, counted once per assistant turn.
     pub output_tokens: u64,
+    /// The agent's latest message, by time.
+    pub said: Option<Said>,
     pub first_ts: Option<DateTime<Utc>>,
     pub last_ts: Option<DateTime<Utc>>,
     /// `requestId`s whose usage has already been counted. Claude Code splits one
@@ -254,6 +268,7 @@ impl AgentInfo {
             tool_calls: Vector::new(),
             tool_index: HashMap::new(),
             output_tokens: 0,
+            said: None,
             first_ts: None,
             last_ts: None,
             seen_dedup_keys: HashSet::new(),
@@ -535,6 +550,19 @@ impl SessionModel {
             }
             FactKind::Prompt(_) => {}
             FactKind::Reasoning(text) => {
+                let said = Said {
+                    excerpt: excerpt(text),
+                    ts: fact.ts,
+                };
+                // The latest by time, and of two at the same time the same one
+                // whichever came first, so the fold stays order-independent.
+                if let Some(a) = self.agents.get_mut(id)
+                    && a.said
+                        .as_ref()
+                        .is_none_or(|old| (old.ts, &old.excerpt) < (said.ts, &said.excerpt))
+                {
+                    a.said = Some(said);
+                }
                 self.last_reasoning.insert(id.to_string(), excerpt(text));
             }
             FactKind::ToolStart {
@@ -889,7 +917,7 @@ impl SessionModel {
     /// scrubber narrates as a log line, updating as the playhead crosses each
     /// marker. Spans the three marker kinds so the line reads like "what's
     /// happening now": a human prompt (◆), an agent spawn (❋), or a tool failure
-    /// (✗). All are events on the timeline, never stitched onto an agent. Ties
+    /// (✗); between markers, the latest thing an agent said (›). All are events on the timeline, never stitched onto an agent. Ties
     /// keep the earlier-considered event; `None` before the first event.
     ///
     /// A spawn is timed by the agent's **birth** (when it starts to exist and its
@@ -947,6 +975,20 @@ impl SessionModel {
                     // ✗ marker sits, so the log and the strip agree.
                     consider(tc.end_ts.or(tc.ts), LogKind::Failure, text);
                 }
+            }
+        }
+        // Messages last, so a prompt, spawn or failure at the same moment wins.
+        for agent in self.agents.values() {
+            if let Some(said) = &agent.said {
+                let name = agent
+                    .agent_type
+                    .as_deref()
+                    .unwrap_or(agent.kind.default_label());
+                consider(
+                    said.ts,
+                    LogKind::Message,
+                    format!("{name}: {}", said.excerpt),
+                );
             }
         }
         best
@@ -1108,6 +1150,50 @@ mod tests {
         assert_eq!(f.kind, LogKind::Failure);
         assert_eq!(f.text, "Bash failed · cargo test");
         assert_eq!(f.ts, ts("2026-06-05T10:12:00Z"));
+    }
+
+    #[test]
+    fn an_agents_latest_message_is_its_status_and_narrated() {
+        let ts = |s: &str| s.parse::<DateTime<Utc>>().ok();
+        let said = |text: &str, t: &str| Fact {
+            agent: Some(MAIN_ID.to_string()),
+            ts: ts(t),
+            kind: FactKind::Reasoning(text.into()),
+        };
+        let early = said("Reading the tests first.", "2026-06-05T10:01:00Z");
+        let late = said(
+            "Found it:   the null check\nis missing.",
+            "2026-06-05T10:04:00Z",
+        );
+        // The latest by time, whichever order they fold in.
+        for order in [[&early, &late], [&late, &early]] {
+            let mut m = SessionModel::new("s".into());
+            for f in order {
+                m.apply_fact(f);
+            }
+            let main = m.agent(MAIN_ID).unwrap();
+            let s = main.said.as_ref().unwrap();
+            assert_eq!(s.excerpt, "Found it: the null check is missing.");
+            assert_eq!(s.ts, ts("2026-06-05T10:04:00Z"));
+        }
+
+        let mut m = SessionModel::new("s".into());
+        m.apply_fact(&early);
+        m.apply_fact(&Fact {
+            agent: Some(MAIN_ID.to_string()),
+            ts: ts("2026-06-05T10:01:00Z"),
+            kind: FactKind::Prompt("fix the bug".into()),
+        });
+        let none = std::collections::BTreeSet::new();
+        let at = |t: &str| m.latest_event_at(ts(t), &none).expect("an event");
+        // At the same moment a prompt wins; afterwards the message is narrated.
+        assert_eq!(at("2026-06-05T10:01:00Z").kind, LogKind::Prompt);
+        m.apply_fact(&late);
+        let e = m
+            .latest_event_at(ts("2026-06-05T10:05:00Z"), &none)
+            .unwrap();
+        assert_eq!(e.kind, LogKind::Message);
+        assert_eq!(e.text, "agent: Found it: the null check is missing.");
     }
 
     #[test]
