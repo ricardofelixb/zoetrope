@@ -592,7 +592,7 @@ fn render_help(frame: &mut Frame, area: Rect, palette: &rataflow::Palette) {
         "q · ctrl-c"
     };
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(""),
         Line::from(vec![
             Span::styled(" camera    ", key),
@@ -653,6 +653,14 @@ fn render_help(frame: &mut Frame, area: Rect, palette: &rataflow::Palette) {
             Span::styled("green edges = agent running", dim),
         ]),
     ];
+    // Native only, above `quit`: a browser cannot start a process.
+    if !cfg!(target_arch = "wasm32") {
+        let open = Line::from(vec![
+            Span::styled(" open      ", key),
+            Span::styled("enter the agent's session (--on-enter)", txt),
+        ]);
+        lines.insert(lines.len() - 4, open);
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)

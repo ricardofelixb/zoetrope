@@ -21,7 +21,8 @@ pub use self::info::SessionInfo;
 pub use self::timeline::Timeline;
 pub use crate::ui::chips::ChipTray;
 
-use self::session::SessionModel;
+use self::session::{MAIN_ID, SessionModel};
+use crate::provider::Provider;
 use crate::tailer::UiEvent;
 
 /// Whether the app is watching a live session or replaying a finished one.
@@ -226,6 +227,19 @@ pub struct App {
     /// Ladder of folded-model snapshots, ascending by `folded`, used to start a
     /// backward seek near its target instead of re-folding from item zero.
     snapshots: Vec<Snapshot>,
+    /// The command `enter` runs for the selected agent's session (`--on-enter`):
+    /// words split on whitespace, `{provider}`, `{session}` and `{cwd}` filled in
+    /// from [`session_of`](Self::session_of). `None`: `enter` does nothing.
+    pub on_enter: Option<String>,
+}
+
+/// A session an agent's card stands for: what resuming it needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRef {
+    pub provider: Provider,
+    pub id: String,
+    /// Where it ran, when its transcript says.
+    pub cwd: Option<String>,
 }
 
 impl App {
@@ -257,6 +271,7 @@ impl App {
             pending_center: None,
             pending_seek: None,
             snapshots: Vec::new(),
+            on_enter: None,
         }
     }
 
@@ -940,6 +955,29 @@ impl App {
     /// during render; copy it out before borrowing `app` mutably).
     pub fn selected_agent_id(&self) -> Option<String> {
         self.flow.selected_nodes().next().map(|n| n.id.clone())
+    }
+
+    /// The session behind an agent's card, when the card is a whole session: the
+    /// root of the session watched, or a member of the job watched, whose
+    /// session the job's metadata names under the member's key.
+    pub fn session_of(&self, agent: &str) -> Option<SessionRef> {
+        let field = |label: &str| self.session_info.field(label).map(str::to_string);
+        if !crate::job::is_job_id(&self.current_session_id) {
+            if agent != MAIN_ID {
+                return None;
+            }
+            return Some(SessionRef {
+                provider: self.session.provider()?,
+                id: self.current_session_id.clone(),
+                cwd: field("cwd"),
+            });
+        }
+        Some(SessionRef {
+            provider: Provider::parse(self.session_info.field(&format!("{agent} provider"))?)?,
+            id: field(&format!("{agent} session"))?,
+            // A member that does not say where it ran ran in the job's folder.
+            cwd: field(&format!("{agent} cwd")).or_else(|| field("cwd")),
+        })
     }
 
     /// Drop every ladder rung, keeping the folded model and the canvas.
@@ -1868,5 +1906,75 @@ mod tests {
         let mut want = got.clone();
         want.sort();
         assert_eq!(got, want);
+    }
+
+    /// `enter` resumes a whole session: the watched one's root, or a job's
+    /// member, each from where it ran.
+    #[test]
+    fn session_of_names_the_watched_session_and_job_members() {
+        use crate::fact::{Fact, FactKind};
+        use crate::job::{Line, Member, header_statements, parse_line};
+        let feed = |app: &mut App, id: &str, statements: Vec<Statement>| {
+            app.handle_ui_event(UiEvent::SessionReset {
+                session_id: id.into(),
+            });
+            app.handle_ui_event(UiEvent::Batch {
+                session_id: id.into(),
+                statements,
+            });
+        };
+
+        let mut stream = crate::provider::claude::Stream::new(Source::Main);
+        let line = r#"{"type":"user","uuid":"u","timestamp":"2026-10-06T10:00:00.000Z","cwd":"/src/app","message":{"role":"user","content":"x"}}"#;
+        let mut app = App::new("s1".into(), Mode::Live);
+        feed(&mut app, "s1", vec![stream.push(line).unwrap()]);
+        let claude = SessionRef {
+            provider: Provider::Claude,
+            id: "s1".into(),
+            cwd: Some("/src/app".into()),
+        };
+        assert_eq!(app.session_of(MAIN_ID), Some(claude));
+        assert_eq!(app.session_of("a1"), None, "a subagent is no session");
+
+        let Some(Line::Header(header)) = parse_line(r#"{"zoe":"job","id":"j","cwd":"/src"}"#)
+        else {
+            panic!("a header");
+        };
+        let Some(Line::Member(entry)) = parse_line(r#"{"member":"plan","session":"s2"}"#) else {
+            panic!("a member");
+        };
+        let plan = Member::new("plan".into(), &entry);
+        let mut statements = header_statements(&header, std::path::Path::new("j.jsonl"));
+        statements.push(plan.birth());
+        statements.push(plan.session(Provider::Codex, "s2"));
+        let mut app = App::new("job:j".into(), Mode::Live);
+        feed(&mut app, "job:j", statements);
+        let mut codex = SessionRef {
+            provider: Provider::Codex,
+            id: "s2".into(),
+            cwd: Some("/src".into()),
+        };
+        assert_eq!(
+            app.session_of("plan"),
+            Some(codex.clone()),
+            "in the job's folder"
+        );
+        assert_eq!(app.session_of(MAIN_ID), None, "the job is no session");
+
+        // A member that says where it ran is resumed there.
+        let cwd = Fact {
+            agent: None,
+            ts: None,
+            kind: FactKind::Session {
+                label: "cwd".into(),
+                value: "/src/tree".into(),
+            },
+        };
+        app.handle_ui_event(UiEvent::Batch {
+            session_id: "job:j".into(),
+            statements: vec![plan.rewrite(cwd.into())],
+        });
+        codex.cwd = Some("/src/tree".into());
+        assert_eq!(app.session_of("plan"), Some(codex));
     }
 }

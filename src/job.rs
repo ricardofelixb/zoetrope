@@ -39,6 +39,14 @@ use crate::state::session::MAIN_ID;
 /// The header line's marker: `{"zoe":"job", …}`.
 const MARKER: &str = "job";
 
+/// What a job's id starts with, telling it apart from a session's.
+const ID_PREFIX: &str = "job:";
+
+/// Whether an id names a job rather than a session.
+pub fn is_job_id(id: &str) -> bool {
+    id.starts_with(ID_PREFIX)
+}
+
 /// The manifest's header, if the file's first non-blank line is one: how a
 /// path is told apart from a transcript, by content like everything else.
 pub fn read_header(manifest: &Path) -> Option<Header> {
@@ -140,7 +148,7 @@ pub fn session_id(header: &Header, manifest: &Path) -> String {
             .file_stem()
             .map_or_else(String::new, |s| s.to_string_lossy().into_owned())
     });
-    format!("job:{name}")
+    format!("{ID_PREFIX}{name}")
 }
 
 /// What the header states: the job as the root agent, its title, and its
@@ -242,6 +250,23 @@ impl Member {
             description: self.task.clone(),
             spawned_by: None,
             interactive: false,
+        }
+    }
+
+    /// Which session the member is, as the job's metadata under the member's
+    /// name: what resuming the member needs.
+    pub fn session(&self, provider: Provider, id: &str) -> Statement {
+        let field = |label: &str, value: &str| Fact {
+            agent: None,
+            ts: None,
+            kind: FactKind::Session {
+                label: format!("{} {label}", self.root),
+                value: value.to_string(),
+            },
+        };
+        Statement {
+            at: None,
+            facts: vec![field("provider", provider.name()), field("session", id)],
         }
     }
 

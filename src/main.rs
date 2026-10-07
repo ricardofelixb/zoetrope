@@ -11,6 +11,7 @@
 //! zoe <job.jsonl>           a job: several sessions, any provider, one tree
 //! zoe <file> --speed N      playback speed multiplier (default 8.0)
 //! zoe --provider <name> ... force the transcript format instead of detecting it
+//! zoe --on-enter <command>  what `enter` runs for the selected agent's session
 //! zoe inspect <file|id|dir> headless: print the session tree + info
 //! ```
 
@@ -41,11 +42,13 @@ pub enum Cli {
     /// start), a project dir (follow its live session), a session id, or
     /// `None` (the current project). `follow` starts at the live edge instead
     /// of replaying. `provider` forces the format instead of detecting it.
+    /// `on_enter` is what `enter` runs (see [`App::on_enter`]).
     View {
         target: Option<String>,
         follow: bool,
         speed: f64,
         provider: Option<Provider>,
+        on_enter: Option<String>,
     },
     /// Headless: parse and print the session tree + info; no TUI. The target
     /// resolves like `View`'s: a file, a session id, or a project directory.
@@ -70,6 +73,9 @@ USAGE:
     zoe <job.jsonl>         a job manifest: several sessions as one tree
     zoe <file> --speed N    playback speed (default 8.0)
     zoe --provider <name>   force the format (claude, codex) instead of detecting it
+    zoe --on-enter <cmd>    what enter runs for the selected agent's session, e.g.
+                            \"claude --resume {session}\"; {provider}, {session} and
+                            {cwd} are filled in
     zoe inspect <file|id>   headless: print the session tree + info
     zoe --version           print the version and exit
 
@@ -117,6 +123,7 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
     let mut follow = false;
     let mut speed = DEFAULT_REPLAY_SPEED;
     let mut provider = None;
+    let mut on_enter = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -142,6 +149,16 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
                 }
             }
             "--provider" => provider = provider_flag(&mut args)?,
+            "--on-enter" => {
+                let command = args.next().ok_or_else(|| {
+                    anyhow!(
+                        "--on-enter requires a command
+
+{USAGE}"
+                    )
+                })?;
+                on_enter = Some(command);
+            }
             other if other.starts_with('-') => {
                 bail!("unknown flag {other:?}\n\n{USAGE}");
             }
@@ -159,6 +176,7 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
         follow,
         speed,
         provider,
+        on_enter,
     })
 }
 
@@ -242,6 +260,7 @@ async fn run_tui(cli: Cli) -> Result<()> {
         follow,
         speed,
         provider,
+        on_enter,
     } = cli
     else {
         unreachable!("inspect handled in main");
@@ -292,7 +311,8 @@ async fn run_tui(cli: Cli) -> Result<()> {
         }
     });
 
-    let app = App::new(session_id, mode);
+    let mut app = App::new(session_id, mode);
+    app.on_enter = on_enter;
     tui::run(app, tail_tx, ui_rx).await
 }
 
@@ -402,6 +422,7 @@ mod tests {
                 follow,
                 speed,
                 provider,
+                on_enter: None,
             } => {
                 assert_eq!(p, "s.jsonl");
                 assert_eq!(speed, 4.0);
@@ -424,6 +445,22 @@ mod tests {
             }
             other => panic!("got {other:?}"),
         }
+    }
+
+    #[test]
+    fn on_enter_takes_the_command_whole() {
+        match cli(&["--on-enter", "claude --resume {session}", "j.jsonl"]).unwrap() {
+            Cli::View {
+                target: Some(p),
+                on_enter: Some(command),
+                ..
+            } => {
+                assert_eq!(p, "j.jsonl");
+                assert_eq!(command, "claude --resume {session}");
+            }
+            other => panic!("got {other:?}"),
+        }
+        assert!(cli(&["--on-enter"]).is_err());
     }
 
     #[test]
