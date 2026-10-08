@@ -356,7 +356,9 @@ async fn run_tui(cli: Cli) -> Result<()> {
     let target = match (watch, target) {
         (Some(watch), _) => Target::Job(watch_manifest(watch)?),
         (None, Some(t)) => resolve_target(t)?,
-        (None, None) => Target::Here(std::env::current_dir().context("resolving current directory")?),
+        (None, None) => {
+            Target::Here(std::env::current_dir().context("resolving current directory")?)
+        }
     };
     let (session_id, mode, replay, speed) = match &target {
         // A concrete file, or a stored session by id → bulk-load + tail. Paced
