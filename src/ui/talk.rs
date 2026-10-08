@@ -644,7 +644,11 @@ mod tests {
             !shown.contains("Here is the plan") && !shown.contains("Fix the bug"),
             "{shown}"
         );
-        assert_eq!(model.agent_count(), 3, "told makes no agent");
+        assert_eq!(
+            model.agent_count(),
+            2,
+            "told makes no agent, and the job's root has no card"
+        );
     }
 
     /// The job's root shows everyone's, and its own copy of a prompt once.

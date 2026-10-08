@@ -2,9 +2,11 @@
 //!
 //! An orchestrator that runs one agent after another (an explorer, a planner,
 //! an implementer, a reviewer, each its own CLI process and its own session)
-//! writes a manifest naming them. `zoe <manifest>` then draws the job as the
-//! root and each session under it, with everything that session spawned below
-//! that. The manifest is append-only JSONL, so a job is followed live like any
+//! writes a manifest naming them. `zoe <manifest>` then draws each session as
+//! the root of its own tree, with everything that session spawned below it.
+//! The job's own root, the header's agent, is scaffolding and has no card: it
+//! holds the job's title and task for the panel and the chapters, and with no
+//! session under it the canvas is empty. The manifest is append-only JSONL, so a job is followed live like any
 //! transcript: a member appears when its line is written, and each member's
 //! files are tailed as they grow.
 //!
@@ -44,7 +46,7 @@
 //! is opened and read by its own provider unchanged. What this module adds is
 //! the one translation a shared tree needs, [`Member::rewrite`]: every member
 //! calls its own root `"main"`, so a member's ids are renamed into its own
-//! namespace and its root is hung under the job's.
+//! namespace and its root is hung under the job's (which is not drawn).
 
 use std::path::{Path, PathBuf};
 

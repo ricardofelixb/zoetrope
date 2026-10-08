@@ -116,16 +116,21 @@ const LOCAL_V_GAP: f64 = 5.0;
 /// When `relayout` is true, any structural change ends with a full
 /// `Sugiyama::vertical()` pass (which overwrites the local placements). When
 /// false — Manual camera: the user owns the view — nothing existing moves;
-/// the caller tracks dirtiness and relayouts when the camera re-engages.
+/// the caller tracks dirtiness and relayouts when the camera re-engages. The
+/// exception is the first cards onto an empty canvas, which are several trees
+/// (a job's): placing them locally would stack the trees, and nothing is there
+/// to move.
 /// Agents the model hides (and what hangs under them) are left off the canvas,
-/// and taken off it if they were there. Returns `true` if structure changed.
+/// and taken off it if they were there. So is a job's root, with no edge from
+/// it: what hung under it is the root of its own tree. Returns `true` if structure changed.
 pub fn sync(flow: &mut AgentFlow, model: &SessionModel, relayout: bool) -> bool {
     let mut structural = false;
+    let empty = flow.nodes().next().is_none();
 
     let hidden: std::collections::HashSet<&String> = model
         .spawn_order
         .iter()
-        .filter(|id| model.hidden(id))
+        .filter(|id| model.undrawn(id))
         .collect();
     let drawn: Vec<String> = hidden
         .iter()
@@ -180,7 +185,14 @@ pub fn sync(flow: &mut AgentFlow, model: &SessionModel, relayout: bool) -> bool 
                         parent.position.y + parent.height + LOCAL_V_GAP,
                     )
                 })
-                .unwrap_or((0.0, 0.0));
+                .unwrap_or_else(|| {
+                    // A tree's root: past the trees already there.
+                    let right = flow
+                        .nodes()
+                        .map(|n| n.position.x + n.width + LOCAL_H_GAP)
+                        .fold(0.0, f64::max);
+                    (right, 0.0)
+                });
             // Read-only monitor: nodes are selectable (detail panel) and
             // draggable (manual arrangement) — but never deletable and never
             // connection sources. Enforced at the DTO level, not just the key
@@ -207,7 +219,7 @@ pub fn sync(flow: &mut AgentFlow, model: &SessionModel, relayout: bool) -> bool 
         if hidden.contains(id) {
             continue;
         }
-        let Some(parent) = &info.parent else {
+        let Some(parent) = info.parent.as_ref().filter(|p| !hidden.contains(p)) else {
             continue;
         };
         let animated = info.status == AgentStatus::Running;
@@ -239,7 +251,21 @@ pub fn sync(flow: &mut AgentFlow, model: &SessionModel, relayout: bool) -> bool 
         }
     }
 
-    if structural && relayout {
+    let trees = || {
+        let root = |id: &&String| {
+            model
+                .agent(id)
+                .is_some_and(|a| a.parent.as_ref().is_none_or(|p| hidden.contains(p)))
+        };
+        model
+            .spawn_order
+            .iter()
+            .filter(|id| !hidden.contains(id))
+            .filter(root)
+            .nth(1)
+            .is_some()
+    };
+    if structural && (relayout || empty && trees()) {
         self::relayout(flow);
     }
     structural
@@ -276,6 +302,56 @@ pub fn remove_agents(flow: &mut AgentFlow, agents: &[String]) {
 /// the per-agent diffing in [`sync`].
 pub fn relayout(flow: &mut AgentFlow) {
     flow.apply_layout(Sugiyama::vertical());
+    side_by_side(flow);
+}
+
+/// Set the trees of `flow` next to each other, left to right in the order
+/// their roots were added, tops level.
+///
+/// Sugiyama lays out each connected tree from the same origin and leaves a
+/// card with no edge where it was, so several trees (a job's groups, whose
+/// root has no card) would land on top of one another. One tree stays as laid.
+fn side_by_side(flow: &mut AgentFlow) {
+    let parent: std::collections::HashMap<&str, &str> = flow
+        .edges()
+        .iter()
+        .map(|e| (e.target.as_str(), e.source.as_str()))
+        .collect();
+    let mut trees: Vec<Vec<&str>> = Vec::new();
+    let mut tree_of: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for node in flow.nodes() {
+        let mut root = node.id.as_str();
+        while let Some(&up) = parent.get(root) {
+            root = up;
+        }
+        let next = trees.len();
+        let tree = *tree_of.entry(root).or_insert(next);
+        if tree == next {
+            trees.push(Vec::new());
+        }
+        trees[tree].push(node.id.as_str());
+    }
+    if trees.len() < 2 {
+        return;
+    }
+    let mut moves = Vec::new();
+    let (mut cursor, mut level) = (None, None);
+    for ids in &trees {
+        let cards: Vec<_> = ids.iter().filter_map(|id| flow.node(id)).collect();
+        let left = cards.iter().map(|n| n.position.x).fold(f64::MAX, f64::min);
+        let right = cards
+            .iter()
+            .map(|n| n.position.x + n.width)
+            .fold(f64::MIN, f64::max);
+        let up = cards.iter().map(|n| n.position.y).fold(f64::MAX, f64::min);
+        let at = *cursor.get_or_insert(left);
+        let (dx, dy) = (at - left, *level.get_or_insert(up) - up);
+        cursor = Some(at + (right - left) + LOCAL_H_GAP);
+        for n in cards {
+            moves.push((n.id.clone(), (n.position.x + dx, n.position.y + dy)));
+        }
+    }
+    flow.set_node_positions(moves);
 }
 
 #[cfg(test)]
@@ -307,6 +383,98 @@ mod tests {
         };
         m.apply_meta("abc123", None, &meta);
         m
+    }
+
+    /// A job's model: the header's root, and a group under it per name.
+    fn job_with_groups(groups: &[&str]) -> SessionModel {
+        use crate::fact::{Fact, FactKind};
+        let mut m = SessionModel::new("job:j".into());
+        let agent = |id: &str, kind, parent: Option<&str>| Fact {
+            agent: Some(id.to_string()),
+            ts: None,
+            kind: FactKind::Agent {
+                kind,
+                parent: parent.map(str::to_string),
+                agent_type: Some("job".into()),
+                description: None,
+                spawned_by: None,
+                interactive: false,
+            },
+        };
+        m.apply_fact(&agent("main", AgentKind::Main, None));
+        for g in groups {
+            m.apply_fact(&agent(g, AgentKind::Group, Some("main")));
+        }
+        m
+    }
+
+    #[test]
+    fn a_jobs_root_has_no_card_and_its_groups_are_trees_of_their_own() {
+        let model = job_with_groups(&["c1", "c2"]);
+        let mut flow = new_flow();
+        assert!(sync(&mut flow, &model, true));
+        assert!(flow.node("main").is_none());
+        assert!(flow.node("c1").is_some() && flow.node("c2").is_some());
+        assert!(flow.edges().is_empty(), "no edge from a hidden root");
+        assert_eq!(model.agent_count(), 2);
+        let (a, b) = (flow.node("c1").unwrap(), flow.node("c2").unwrap());
+        assert!(
+            a.position.x + a.width <= b.position.x && a.position.y == b.position.y,
+            "the trees stand side by side"
+        );
+        assert_eq!(model.last_active_agent_id().as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn a_jobs_first_cards_stand_apart_without_a_relayout() {
+        use crate::fact::{Fact, FactKind};
+        let mut model = job_with_groups(&["g1", "g2"]);
+        for (id, group) in [("a", "g1"), ("b", "g1"), ("c", "g2")] {
+            model.apply_fact(&Fact {
+                agent: Some(id.into()),
+                ts: None,
+                kind: FactKind::Agent {
+                    kind: AgentKind::Subagent,
+                    parent: Some(group.into()),
+                    agent_type: None,
+                    description: None,
+                    spawned_by: None,
+                    interactive: false,
+                },
+            });
+        }
+        let mut flow = new_flow();
+        assert!(sync(&mut flow, &model, false));
+        let cards: Vec<_> = ["g1", "g2", "a", "b", "c"]
+            .iter()
+            .map(|id| flow.node(id).unwrap())
+            .collect();
+        for (i, a) in cards.iter().enumerate() {
+            for b in &cards[i + 1..] {
+                let apart = a.position.x + a.width <= b.position.x
+                    || b.position.x + b.width <= a.position.x
+                    || a.position.y + a.height <= b.position.y
+                    || b.position.y + b.height <= a.position.y;
+                assert!(apart, "{} and {} overlap", a.id, b.id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_job_with_only_its_header_draws_nothing() {
+        let model = job_with_groups(&[]);
+        let mut flow = new_flow();
+        assert!(!sync(&mut flow, &model, true));
+        assert_eq!(flow.nodes().count(), 0);
+        assert_eq!(model.agent_count(), 0);
+        assert_eq!(model.last_active_agent_id(), None);
+    }
+
+    #[test]
+    fn a_plain_session_keeps_its_root() {
+        let mut flow = new_flow();
+        sync(&mut flow, &model_with_subagent(), true);
+        assert!(flow.node("main").is_some());
     }
 
     #[test]
