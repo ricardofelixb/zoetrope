@@ -3,7 +3,9 @@
 //! CLI (hand-rolled over `std::env::args`, no clap):
 //!
 //! ```text
-//! zoe                       follow the current project's live session
+//! zoe                       watch the orchestrate agents of this directory's repo
+//! zoe all                   watch the orchestrate agents of every repo
+//! zoe session               follow the current project's live session
 //! zoe <file.jsonl>          replay a recording, played from the start
 //! zoe <id>                  replay a session by id (or a unique prefix)
 //! zoe <dir>                 follow another project's live session
@@ -42,13 +44,15 @@ const CHANNEL_CAP: usize = 32;
 pub enum Cli {
     /// View a session in the TUI. `target`: a session file (replay it from the
     /// start), a project dir (follow its live session), a session id, or
-    /// `None` (the current project). `follow` starts at the live edge instead
+    /// `None` (the current project, as `zoe session`). `watch` replaces the
+    /// target with a manifest of orchestrate agents. `follow` starts at the live edge instead
     /// of replaying. `provider` forces the format instead of detecting it.
     /// `on_send` sends what `enter` writes (see [`App::on_send`]);
     /// `agents_only` watches the agents (see [`App::agents_only`]); `on_root`
     /// is what clicking the root's card runs (see [`App::on_root`]).
     View {
         target: Option<String>,
+        watch: Option<Watch>,
         follow: bool,
         speed: f64,
         provider: Option<Provider>,
@@ -64,6 +68,15 @@ pub enum Cli {
     },
 }
 
+/// Which orchestrate agents `zoe` watches when it is given no file.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Watch {
+    /// This directory's repo (`zoe`).
+    Repo,
+    /// Every repo (`zoe all`).
+    All,
+}
+
 /// Default replay speed multiplier.
 const DEFAULT_REPLAY_SPEED: f64 = 8.0;
 
@@ -71,7 +84,9 @@ const USAGE: &str = "\
 zoetrope — visualize coding-agent sessions as a flow graph
 
 USAGE:
-    zoe                     follow the current project's live session
+    zoe                     watch the orchestrate agents of this directory's repo
+    zoe all                 watch the orchestrate agents of every repo
+    zoe session             follow the current project's live session
     zoe <file.jsonl>        replay a recording, played from the start
     zoe <id>                replay a session by id, or a unique prefix of one
     zoe <dir>               follow another project's live session
@@ -186,8 +201,24 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
         }
     }
 
+    // No target watches this repo's agents; `all` every repo's; `session` is
+    // the old no-target view. `./all` is still a path.
+    let mut watch = None;
+    match target.as_deref() {
+        None => watch = Some(Watch::Repo),
+        Some("all") => watch = Some(Watch::All),
+        Some("session") => target = None,
+        Some(_) => {}
+    }
+    if watch.is_some() {
+        target = None;
+        follow = true;
+        agents_only = true;
+    }
+
     Ok(Cli::View {
         target,
+        watch,
         follow,
         speed,
         provider,
@@ -195,6 +226,42 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
         agents_only,
         on_root,
     })
+}
+
+/// The orchestrate manifest `zoe` and `zoe all` watch.
+fn watch_manifest(watch: Watch) -> Result<PathBuf> {
+    let state = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else {
+        std::env::home_dir().map(|home| home.join(".local").join("state"))
+    }
+    .context("no state directory")?;
+    let live = state.join("orchestrate").join("live");
+    let (name, file) = match watch {
+        Watch::All => ("all".to_string(), live.join("live.jsonl")),
+        Watch::Repo => {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+                .output();
+            let common = match out {
+                Ok(out) if out.status.success() => {
+                    PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
+                }
+                _ => bail!("not in a git repo"),
+            };
+            let name = common
+                .parent()
+                .and_then(|main| main.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .ok_or_else(|| anyhow!("not in a git repo"))?;
+            let file = live.join("repos").join(format!("{name}.jsonl"));
+            (name, file)
+        }
+    };
+    if !file.is_file() {
+        bail!("no agents in {name} yet");
+    }
+    Ok(file)
 }
 
 /// Fully parse a session, every file of it, into a [`SessionModel`] and its
@@ -274,6 +341,7 @@ async fn run_inspect(target: String, provider: Option<Provider>) -> Result<()> {
 async fn run_tui(cli: Cli) -> Result<()> {
     let Cli::View {
         target,
+        watch,
         follow,
         speed,
         provider,
@@ -285,9 +353,12 @@ async fn run_tui(cli: Cli) -> Result<()> {
         unreachable!("inspect handled in main");
     };
 
-    let target = match target {
-        Some(t) => resolve_target(t)?,
-        None => Target::Here(std::env::current_dir().context("resolving current directory")?),
+    let target = match (watch, target) {
+        (Some(watch), _) => Target::Job(watch_manifest(watch)?),
+        (None, Some(t)) => resolve_target(t)?,
+        (None, None) => {
+            Target::Here(std::env::current_dir().context("resolving current directory")?)
+        }
     };
     let (session_id, mode, replay, speed) = match &target {
         // A concrete file, or a stored session by id → bulk-load + tail. Paced
@@ -401,10 +472,47 @@ mod tests {
         match cli(&[]).unwrap() {
             Cli::View {
                 target: None,
-                follow: false,
+                watch: Some(Watch::Repo),
+                follow: true,
+                agents_only: true,
+                on_send: None,
+                on_root: None,
                 ..
             } => {}
-            other => panic!("expected View{{target:None}}, got {other:?}"),
+            other => panic!("expected the repo watch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn all_watches_every_repo_and_session_is_the_old_default() {
+        match cli(&["all"]).unwrap() {
+            Cli::View {
+                target: None,
+                watch: Some(Watch::All),
+                follow: true,
+                agents_only: true,
+                ..
+            } => {}
+            other => panic!("got {other:?}"),
+        }
+        match cli(&["session"]).unwrap() {
+            Cli::View {
+                target: None,
+                watch: None,
+                follow: false,
+                agents_only: false,
+                ..
+            } => {}
+            other => panic!("got {other:?}"),
+        }
+        // A path named `all` stays a target.
+        match cli(&["./all"]).unwrap() {
+            Cli::View {
+                target: Some(p),
+                watch: None,
+                ..
+            } => assert_eq!(p, "./all"),
+            other => panic!("got {other:?}"),
         }
     }
 
@@ -447,6 +555,7 @@ mod tests {
         match cli(&["s.jsonl", "--speed", "4", "--follow", "--provider", "codex"]).unwrap() {
             Cli::View {
                 target: Some(p),
+                watch: None,
                 follow,
                 speed,
                 provider,
