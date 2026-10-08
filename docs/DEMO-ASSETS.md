@@ -232,6 +232,13 @@ session metadata behind the `i` overlay. Where real data has no better value —
 workflow subagents genuinely carry only `{"agentType":"workflow-subagent"}` —
 the fixture matches reality rather than inventing nicer labels.
 
+## The pi fixture is a real capture
+
+`assets/pi/demo/` is one pi session as pi wrote it, shaped like
+`~/.pi/agent/sessions` (`--<cwd>--/<timestamp>_<id>.jsonl`), trimmed of the
+system prompt, signatures and long strings. `capture_conforms`
+(`src/provider/pi/mod.rs`) runs it through the conformance check.
+
 ## The Codex fixtures are real captures
 
 `assets/codex/` is the other kind of fixture: three real sessions, as Codex

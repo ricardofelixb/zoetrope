@@ -5,7 +5,7 @@
 <h1 align="center">zoetrope</h1>
 
 <p align="center">
-  <em>Watch a Claude Code or Codex session as a live flow graph, in your terminal or your browser.</em>
+  <em>Watch a Claude Code, Codex or pi session as a live flow graph, in your terminal or your browser.</em>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
   <img src="https://raw.githubusercontent.com/furkankly/zoetrope/main/assets/zoetrope.svg" alt="A session drawn as a flow graph: a main agent above the subagents it spawned, over a timeline of tool activity" width="620">
 </p>
 
-Claude Code and Codex write a transcript for every session. zoetrope reads it and draws
+Claude Code, Codex and pi write a transcript for every session. zoetrope reads it and draws
 the session as a graph in your terminal: the main agent, the agents it spawns, and the
 tools each one runs, updating live as it goes. Point it at a finished run and it replays,
 paced by the session's own timestamps. Point it at a running one and it follows along.
@@ -40,10 +40,11 @@ Built on [ratatui](https://ratatui.rs) and [rataflow](https://github.com/furkank
 | --- | --- | --- | --- | --- |
 | [Claude Code](https://claude.com/claude-code) | `~/.claude/projects/` | ✓ | ✓ | ✓ sessions and subagents |
 | [Codex](https://openai.com/codex/) CLI and desktop app | `~/.codex/sessions/` | ✓ | ✓ | ✓ sessions and subagents |
+| [pi](https://github.com/earendil-works/pi) | `~/.pi/agent/sessions/` (`$PI_CODING_AGENT_DIR`) | ✓ | ✓ | – |
 
 zoetrope reads a session from any of its files and tells the formats apart by
-content, so `zoe <file>` works for either, and `zoe <id>` finds a session by id
-across both.
+content, so `zoe <file>` works for any, and `zoe <id>` finds a session by id
+across all.
 
 ![zoetrope replaying a Codex CLI session as a flow graph](https://raw.githubusercontent.com/furkankly/zoetrope/main/assets/zoetrope-codex.gif)
 
@@ -109,7 +110,7 @@ zoe <file.jsonl>             # replay a recording from the start (any file of a 
 zoe <id>                     # replay a session by id, or a unique prefix of one
 zoe <file.jsonl> --follow    # open a recording at its live edge
 zoe <file.jsonl> --speed N   # playback speed (default 8.0)
-zoe --provider codex ...     # force the format instead of detecting it from the file
+zoe --provider pi ...        # force the format instead of detecting it from the file
 zoe inspect <file|id>        # print the session tree and exit (no TUI)
 zoe <job.jsonl>              # a job: several sessions, any provider, as one tree
 zoe --on-enter <command> ... # what enter runs for the selected agent's session
@@ -120,7 +121,7 @@ Give it a directory, or no argument at all, and it finds the newest session in t
 project and follows it live. Whichever way you start, the controls are the same:
 scrub, follow, pause, jump back to live.
 
-An orchestrator that runs several agents for one task, Claude and Codex alike, can
+An orchestrator that runs several agents for one task, Claude, Codex and pi alike, can
 write a job manifest naming their sessions, and `zoe` shows them as one tree: the
 job at the root, each session under it with everything it spawned. New members
 appear as their lines are written. The format is in

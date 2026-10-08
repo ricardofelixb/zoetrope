@@ -30,7 +30,7 @@ The browser build has no filesystem and uses neither. It receives every file of 
 ```rust
 // src/provider/mod.rs
 
-pub enum Provider { Claude, Codex }
+pub enum Provider { Claude, Codex, Pi }
 
 /// What a provider states about one path. The input-side analogue of `Fact`.
 pub struct SessionFile {
@@ -60,7 +60,7 @@ pub struct Session {
 }
 
 /// One per-file parser. `push` is the whole reading contract.
-pub enum Stream { Claude(claude::Stream), Codex(codex::Stream) }
+pub enum Stream { Claude(claude::Stream), Codex(codex::Stream), Pi(pi::Stream) }
 impl Stream {
     pub fn push(&mut self, line: &str) -> Option<Statement>;
 }
@@ -92,6 +92,7 @@ Each provider implements these in `src/provider/<name>/discovery.rs`, about its 
 
 Three things these answers show:
 
+- **pi is the degenerate case.** One file per session, `~/.pi/agent/sessions/--<cwd>--/<timestamp>_<id>.jsonl` (under `$PI_CODING_AGENT_DIR` when set), classified by a first line of `type: "session"`; no children, so `related_paths` is empty. The id prefix prunes by file name, the project is inside the file.
 - **`project_key` is opaque.** Claude stores a lossy sanitized path, Codex the path, other agents a hash. The core never compares a key to a directory; it compares a key to `project_key(cwd)`.
 - **`related_paths` may over-include.** A Codex date directory holds every session of that day; `session_file` on each path sorts them out. Over-include on layout, let content decide.
 - **`ReadMode` exists because Claude's `meta.json` is one JSON document with no trailing newline.** A line tailer never sees a complete line of it. Whole-read files are read in full each tick until they parse (a mid-write read fails and is retried), then stated once.
