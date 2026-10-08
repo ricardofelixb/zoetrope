@@ -513,6 +513,13 @@ impl SessionModel {
         structural
     }
 
+    /// Whether `id` has no card: it is hidden (see [`hidden`](Self::hidden)),
+    /// or it is a job's root, which is scaffolding. A job's groups and members
+    /// are drawn as the roots of their own trees.
+    pub fn undrawn(&self, id: &str) -> bool {
+        (id == MAIN_ID && crate::job::is_job_id(&self.session_id)) || self.hidden(id)
+    }
+
     /// Whether `id`, or anything it hangs under, was taken off the canvas: its
     /// latest `Gone` is at or after its latest statement (or it was never
     /// stated).
@@ -1007,9 +1014,9 @@ impl SessionModel {
         }
     }
 
-    /// Number of agents currently tracked, those taken off the canvas aside.
+    /// Number of agents currently tracked, those without a card aside.
     pub fn agent_count(&self) -> usize {
-        self.agents.keys().filter(|id| !self.hidden(id)).count()
+        self.agents.keys().filter(|id| !self.undrawn(id)).count()
     }
 
     /// Total tool calls across all agents, hidden ones aside.
@@ -1166,13 +1173,16 @@ impl SessionModel {
 
     /// The most recently active agent: latest `last_ts`, ties (and the
     /// no-timestamps case) broken toward the most recently spawned. `None`
-    /// only when there are no agents.
+    /// only when there are no agents with a card.
     pub fn last_active_agent_id(&self) -> Option<String> {
         let mut best: Option<(&str, Option<DateTime<Utc>>)> = None;
         for id in &self.spawn_order {
             let Some(info) = self.agents.get(id) else {
                 continue;
             };
+            if self.undrawn(id) {
+                continue;
+            }
             // `Option` orders `None < Some`; `>=` lets a later spawn win ties.
             if best.as_ref().is_none_or(|(_, ts)| info.last_ts >= *ts) {
                 best = Some((id, info.last_ts));
