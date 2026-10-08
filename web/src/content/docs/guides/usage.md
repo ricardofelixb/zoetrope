@@ -16,7 +16,7 @@ zoe <file.jsonl>             replay a recording from the start, paced (any file 
 zoe <id>                     replay a session by id, or a unique prefix of one
 zoe <file.jsonl> --follow    open a recording at its live edge instead
 zoe <file.jsonl> --speed N   playback speed multiplier (default 8.0)
-zoe --provider codex ...     force the format instead of detecting it from the file
+zoe --provider pi ...        force the format instead of detecting it from the file
 zoe inspect <file|id>        print the session tree and exit (no TUI)
 ```
 

@@ -22,7 +22,7 @@ zoe <id>                 # replay a session by id, or a unique prefix, across pr
 zoe <dir>                # follow another project's live session
 zoe <file> --follow      # ride a file's live edge instead of replaying it
 zoe <file> --speed 8     # playback speed (default 8.0)
-zoe --provider codex ... # force the format instead of reading it off the content
+zoe --provider codex|pi ... # force the format instead of reading it off the content
 zoe inspect <file|id>    # no TUI: print session info + parsed tree (smoke-test)
 ```
 
@@ -105,6 +105,10 @@ src/
 │       ├── mod.rs       # the Codex provider: rollout lines → Facts through a `Stream` that learns its thread from its first line
 │       ├── wire.rs      # Codex's serde model: the envelope, `response_item`, `event_msg` and its `item_completed` items
 │       └── discovery.rs # the ~/.codex/sessions/YYYY/MM/DD layout: rollouts, the head read that classifies them, the primitives
+│   └── pi/
+│       ├── mod.rs       # the pi provider: session lines → Facts through a `Stream`; one agent, no spawns
+│       ├── wire.rs      # pi's serde model: the header and `message` entries with their content blocks
+│       └── discovery.rs # the ~/.pi/agent/sessions/--<cwd>--/ layout: one file per session, classified by its header
 ├── state/
 │   ├── mod.rs     # App: owns the Flow + SessionModel + Timeline + SessionInfo + UI state; handle_ui_event, seek, camera
 │   ├── session.rs # SessionModel: the pure domain model (agents, statuses, tool calls) folded from Facts — knows no format
@@ -194,7 +198,7 @@ pub struct AgentInfo {
 }
 ```
 
-**Untimed session metadata → `SessionInfo` (not the timeline).** Session-level facts (`Title`, `Session { label, value }`, `Tally`) carry no timestamp and are not activity, so they would otherwise clump at the front of the sorted timeline. Feeders route them into `SessionInfo { title, fields: Vec<(label, value)>, tallies }` instead, whichever record carried them (`Statement::take_session_meta`; a Codex root names itself and its app on one line): the provider labels the rows (Claude: `mode`, `permission`, `last prompt`; tallies `queued`, `file edits`; Codex: `app`, `version`, `cwd`), values are latest-wins per label in first-seen order, and the `i` overlay and `inspect` render whatever rows arrived (`state::render`). Lives on `App` (not `SessionModel`), so it survives backward-seek rebuilds — it's session-constant. The title is on `SessionInfo`, NOT on `SessionModel`, so the model holds only timed, foldable state.
+**Untimed session metadata → `SessionInfo` (not the timeline).** Session-level facts (`Title`, `Session { label, value }`, `Tally`) carry no timestamp and are not activity, so they would otherwise clump at the front of the sorted timeline. Feeders route them into `SessionInfo { title, fields: Vec<(label, value)>, tallies }` instead, whichever record carried them (`Statement::take_session_meta`; a Codex root names itself and its app on one line): the provider labels the rows (Claude: `mode`, `permission`, `last prompt`; tallies `queued`, `file edits`; Codex: `app`, `version`, `cwd`; pi: `cwd`), values are latest-wins per label in first-seen order, and the `i` overlay and `inspect` render whatever rows arrived (`state::render`). Lives on `App` (not `SessionModel`), so it survives backward-seek rebuilds — it's session-constant. The title is on `SessionInfo`, NOT on `SessionModel`, so the model holds only timed, foldable state.
 
 **Graph topology (v1): nodes are agents, not messages.** One node per agent + one group node per workflow run. Edges: one parent edge per agent, id `e-<child id>` (`graph::edge_id`), `workflow → its subagents`. Sessions have 800+ lines — per-message nodes would be noise; agents are the story.
 

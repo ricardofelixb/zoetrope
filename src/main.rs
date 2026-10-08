@@ -93,7 +93,7 @@ USAGE:
     zoe <file> --follow     follow a file's live edge instead of replaying
     zoe <job.jsonl>         a job manifest: several sessions as one tree
     zoe <file> --speed N    playback speed (default 8.0)
-    zoe --provider <name>   force the format (claude, codex) instead of detecting it
+    zoe --provider <name>   force the format (claude, codex, pi) instead of detecting it
     zoe --on-send <cmd>     what sends a message written to an agent with enter,
                             e.g. \"say {session} {text}\": {text} is the message,
                             and {provider}, {session}, {cwd} the agent's
@@ -117,7 +117,7 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Cli> {
             .ok_or_else(|| anyhow!("--provider requires a name\n\n{USAGE}"))?;
         Provider::parse(&v)
             .map(Some)
-            .ok_or_else(|| anyhow!("unknown provider {v:?}; known: claude, codex"))
+            .ok_or_else(|| anyhow!("unknown provider {v:?}; known: claude, codex, pi"))
     };
 
     // `inspect <file>` is the one distinct (headless) subcommand.
