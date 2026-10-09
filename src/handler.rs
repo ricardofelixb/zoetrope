@@ -381,6 +381,7 @@ fn scroll_detail(app: &mut App, delta: i32) -> bool {
     if delta < 0 {
         app.detail_follow = false;
     }
+    app.detail_down |= delta > 0;
     app.detail_scroll = (app.detail_scroll as i32 + delta).max(0) as u16;
     true
 }

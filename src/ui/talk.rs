@@ -232,7 +232,10 @@ fn inline_code(text: &str, style: Style, code: Style) -> Vec<Span<'static>> {
 
 /// How many things `scope`'s conversation shows, to count the new ones.
 pub(crate) fn said(model: &SessionModel, scope: &str) -> usize {
-    items(model, scope).len()
+    items(model, scope)
+        .iter()
+        .filter(|i| !matches!(i, Item::Entry(e) if e.kind == EntryKind::Thought))
+        .count()
 }
 
 /// Whether `id` is `scope` or hangs somewhere below it.

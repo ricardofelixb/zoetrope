@@ -30,6 +30,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
         session,
         detail_scroll,
         detail_follow,
+        detail_down,
         detail_seen,
         whole_prompts,
         panel_drag,
@@ -94,7 +95,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     // it. The renderer clamps the offset to the real maximum and writes it (and
     // the re-attach) back, so the indicator and the next keypress agree.
     let total = lines.len().min(u16::MAX as usize) as u16;
-    let (scroll, follow) = resolve_scroll(total, talk_inner.height, *detail_scroll, *detail_follow);
+    let (scroll, follow) = resolve_scroll(
+        total,
+        talk_inner.height,
+        *detail_scroll,
+        *detail_follow,
+        std::mem::take(detail_down),
+    );
     *detail_scroll = scroll;
     *detail_follow = follow;
     // Scrolled up, what has been said since is counted, as a chat would.
@@ -186,11 +193,13 @@ fn render_header(
 /// Resolve the panel's scroll offset for one render: clamp to the reachable
 /// maximum (keep the last screenful in view — no over-scroll into blank) and
 /// reconcile the tail. Following pins to the bottom; scrolling back down to the
-/// bottom (or content that fits) re-attaches. Returns `(offset, tailing)`.
-fn resolve_scroll(total: u16, height: u16, scroll: u16, follow: bool) -> (u16, bool) {
+/// bottom (or content that fits) re-attaches, but only on a scroll `down`: content
+/// that shrinks under a detached reader leaves them detached. Returns
+/// `(offset, tailing)`.
+fn resolve_scroll(total: u16, height: u16, scroll: u16, follow: bool, down: bool) -> (u16, bool) {
     let max = total.saturating_sub(height);
     let offset = if follow { max } else { scroll.min(max) };
-    (offset, offset >= max)
+    (offset, follow || down && offset >= max)
 }
 
 /// Format a timing line from an agent's first/last timestamps; a running
@@ -225,14 +234,18 @@ mod tests {
 
     #[test]
     fn resolve_scroll_clamps_and_reconciles_tail() {
-        // Content shorter than the viewport → always tailing, offset 0.
-        assert_eq!(resolve_scroll(5, 10, 3, false), (0, true));
+        // Content shorter than the viewport → offset 0; a detached reader stays
+        // detached until they scroll down, which re-attaches.
+        assert_eq!(resolve_scroll(5, 10, 3, false, false), (0, false));
+        assert_eq!(resolve_scroll(5, 10, 3, false, true), (0, true));
         // Following → pinned to the bottom (max = 20 - 8 = 12).
-        assert_eq!(resolve_scroll(20, 8, 0, true), (12, true));
+        assert_eq!(resolve_scroll(20, 8, 0, true, false), (12, true));
         // Detached and scrolled up → keep the offset, stay detached.
-        assert_eq!(resolve_scroll(20, 8, 5, false), (5, false));
+        assert_eq!(resolve_scroll(20, 8, 5, false, false), (5, false));
         // Detached but (over-)scrolled to the bottom → clamp + re-attach.
-        assert_eq!(resolve_scroll(20, 8, 99, false), (12, true));
+        assert_eq!(resolve_scroll(20, 8, 99, false, true), (12, true));
+        // Content that shrank under a detached reader leaves them detached.
+        assert_eq!(resolve_scroll(20, 8, 31, false, false), (12, false));
     }
 
     use chrono::TimeZone;
