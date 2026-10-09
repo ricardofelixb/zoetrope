@@ -120,6 +120,13 @@ pub(crate) fn lines(
                     false,
                 ),
                 EntryKind::Waiting => continue,
+                EntryKind::Thought => (
+                    (!own).then(|| who.clone()),
+                    subtle,
+                    e.text.as_str(),
+                    subtle.add_modifier(Modifier::ITALIC),
+                    false,
+                ),
                 EntryKind::Message => (
                     (!own).then(|| who.clone()),
                     Style::default()
@@ -323,7 +330,7 @@ fn items<'a>(model: &'a SessionModel, scope: &str) -> Vec<Item<'a>> {
         .collect();
     let prompted: HashSet<&str> = feed
         .iter()
-        .filter(|e| e.kind != EntryKind::Message)
+        .filter(|e| !matches!(e.kind, EntryKind::Message | EntryKind::Thought))
         .map(|e| e.agent.as_str())
         .collect();
     let mut items: Vec<Item> = feed

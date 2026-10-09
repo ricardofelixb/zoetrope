@@ -66,6 +66,9 @@ pub struct SessionModel {
     /// The conversation, every agent's, in time order. A set, so a re-applied
     /// fact is no second entry and the order never depends on arrival.
     feed: OrdSet<Entry>,
+    /// Each agent's latest thinking as its one `Thought` entry in the feed, so
+    /// a newer thought replaces it and a later message retires it.
+    thoughts: HashMap<String, Entry>,
     /// Excerpt of each agent's most recent reasoning. One logical turn spans
     /// several records, so the reasoning for a spawn usually lives on an
     /// EARLIER record than the call — this is the cross-record fallback for
@@ -129,6 +132,8 @@ pub enum EntryKind {
     Told,
     /// The agent's own words.
     Message,
+    /// The agent's latest thinking, until it says something after it.
+    Thought,
     /// The agent's turn ended. Carries no text: it dates the agent's final
     /// report, its latest message at or before it.
     Waiting,
@@ -370,6 +375,7 @@ impl SessionModel {
             spawn_context: HashMap::new(),
             prompts: Vector::new(),
             feed: OrdSet::new(),
+            thoughts: HashMap::new(),
             last_reasoning: HashMap::new(),
             gone: OrdMap::new(),
             declared: OrdMap::new(),
@@ -549,16 +555,36 @@ impl SessionModel {
             FactKind::Prompt(text) => Some((EntryKind::Prompt, text.clone())),
             FactKind::Told(text) => Some((EntryKind::Told, text.clone())),
             FactKind::Message(text) => Some((EntryKind::Message, text.clone())),
+            FactKind::Reasoning(text) => Some((EntryKind::Thought, text.clone())),
             FactKind::Waiting => Some((EntryKind::Waiting, String::new())),
             _ => None,
         };
         if let Some((kind, text)) = entry {
-            self.feed.insert(Entry {
+            let entry = Entry {
                 ts: fact.ts,
                 agent: id.to_string(),
                 kind,
                 text,
-            });
+            };
+            match kind {
+                EntryKind::Thought => {
+                    if self.thoughts.get(id).is_none_or(|old| old.ts <= entry.ts) {
+                        if let Some(old) = self.thoughts.insert(id.to_string(), entry.clone()) {
+                            self.feed.remove(&old);
+                        }
+                        self.feed.insert(entry);
+                    }
+                }
+                _ => {
+                    if kind == EntryKind::Message
+                        && self.thoughts.get(id).is_some_and(|t| t.ts <= entry.ts)
+                        && let Some(old) = self.thoughts.remove(id)
+                    {
+                        self.feed.remove(&old);
+                    }
+                    self.feed.insert(entry);
+                }
+            }
         }
         // A turn's end, and what starts the agent again: kept as the latest of
         // each, so the fold stays order-independent.
@@ -1329,6 +1355,37 @@ mod tests {
         m.apply_fact(&by(FactKind::Prompt("more".into()), "2026-06-05T10:02:00Z"));
         m.recompute_liveness(ts("2026-06-05T10:02:05Z"));
         assert_eq!(m.agent(MAIN_ID).unwrap().status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn a_thought_is_one_feed_entry_until_the_agent_speaks() {
+        let at = |t: &str| t.parse::<DateTime<Utc>>().ok();
+        let fact = |kind, t: &str| Fact {
+            agent: Some(MAIN_ID.to_string()),
+            ts: at(t),
+            kind,
+        };
+        let mut m = SessionModel::new("s".into());
+        m.apply_fact(&fact(
+            FactKind::Reasoning("a".into()),
+            "2026-06-05T10:01:00Z",
+        ));
+        m.apply_fact(&fact(
+            FactKind::Reasoning("ab".into()),
+            "2026-06-05T10:02:00Z",
+        ));
+        let thoughts = |m: &SessionModel| {
+            m.feed()
+                .filter(|e| e.kind == EntryKind::Thought)
+                .map(|e| e.text.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(thoughts(&m), ["ab"]);
+        m.apply_fact(&fact(
+            FactKind::Message("done".into()),
+            "2026-06-05T10:03:00Z",
+        ));
+        assert!(thoughts(&m).is_empty());
     }
 
     #[test]
