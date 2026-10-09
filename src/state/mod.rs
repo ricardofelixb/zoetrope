@@ -174,6 +174,8 @@ pub struct App {
     /// call). True by default and after selecting an agent; scrolling up detaches
     /// it; scrolling back to the bottom re-attaches. Independent of the camera.
     pub detail_follow: bool,
+    /// The reader scrolled down since the last render, which may reach the tail.
+    pub detail_down: bool,
     /// Ephemeral tool-call chips drawn as an overlay below agent cards.
     pub chips: ChipTray,
     /// Whether the help overlay is shown (`?` toggles, `esc` closes).
@@ -341,6 +343,7 @@ impl App {
             camera: Camera::Overview,
             detail_scroll: 0,
             detail_follow: true,
+            detail_down: false,
             chips: ChipTray::default(),
             show_help: false,
             layout_dirty: false,
@@ -1125,6 +1128,7 @@ impl App {
         if delta < 0 {
             self.detail_follow = false;
         }
+        self.detail_down |= delta > 0;
         self.detail_scroll =
             (i32::from(self.detail_scroll) + delta).clamp(0, i32::from(u16::MAX)) as u16;
         true

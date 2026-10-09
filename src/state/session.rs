@@ -66,6 +66,13 @@ pub struct SessionModel {
     /// The conversation, every agent's, in time order. A set, so a re-applied
     /// fact is no second entry and the order never depends on arrival.
     feed: OrdSet<Entry>,
+    /// Each agent's latest thinking, shown in the feed as its one `Thought`
+    /// entry while nothing has settled it.
+    thoughts: HashMap<String, Entry>,
+    /// When each agent last said, finished a turn, was prompted or ended.
+    settled: HashMap<String, DateTime<Utc>>,
+    /// Agents that ended with no time, which settles every thought of theirs.
+    closed: HashSet<String>,
     /// Excerpt of each agent's most recent reasoning. One logical turn spans
     /// several records, so the reasoning for a spawn usually lives on an
     /// EARLIER record than the call — this is the cross-record fallback for
@@ -129,6 +136,8 @@ pub enum EntryKind {
     Told,
     /// The agent's own words.
     Message,
+    /// The agent's latest thinking, until it says something after it.
+    Thought,
     /// The agent's turn ended. Carries no text: it dates the agent's final
     /// report, its latest message at or before it.
     Waiting,
@@ -370,6 +379,9 @@ impl SessionModel {
             spawn_context: HashMap::new(),
             prompts: Vector::new(),
             feed: OrdSet::new(),
+            thoughts: HashMap::new(),
+            settled: HashMap::new(),
+            closed: HashSet::new(),
             last_reasoning: HashMap::new(),
             gone: OrdMap::new(),
             declared: OrdMap::new(),
@@ -549,16 +561,57 @@ impl SessionModel {
             FactKind::Prompt(text) => Some((EntryKind::Prompt, text.clone())),
             FactKind::Told(text) => Some((EntryKind::Told, text.clone())),
             FactKind::Message(text) => Some((EntryKind::Message, text.clone())),
+            FactKind::Reasoning(text) => Some((EntryKind::Thought, text.clone())),
             FactKind::Waiting => Some((EntryKind::Waiting, String::new())),
             _ => None,
         };
+        // The thought is the one entry that is not simply kept: the latest of
+        // them (a longer one at the same time, as thinking accumulates) shows
+        // unless a message, a turn's end, a prompt or the agent's end came at
+        // or after it, whichever the order they folded in.
+        let thinks = matches!(
+            fact.kind,
+            FactKind::Reasoning(_)
+                | FactKind::Message(_)
+                | FactKind::Waiting
+                | FactKind::Prompt(_)
+                | FactKind::Ended(_)
+        );
+        if thinks && let Some(old) = self.thoughts.get(id) {
+            self.feed.remove(old);
+        }
         if let Some((kind, text)) = entry {
-            self.feed.insert(Entry {
+            let entry = Entry {
                 ts: fact.ts,
                 agent: id.to_string(),
                 kind,
                 text,
-            });
+            };
+            if kind != EntryKind::Thought {
+                self.feed.insert(entry);
+            } else if self.thoughts.get(id).is_none_or(|old| {
+                (old.ts, old.text.len(), &old.text) < (entry.ts, entry.text.len(), &entry.text)
+            }) {
+                self.thoughts.insert(id.to_string(), entry);
+            }
+        }
+        if thinks {
+            if fact.ts.is_none() && matches!(fact.kind, FactKind::Ended(_)) {
+                self.closed.insert(id.to_string());
+            }
+            if let Some(ts) = fact
+                .ts
+                .filter(|_| !matches!(fact.kind, FactKind::Reasoning(_)))
+            {
+                let end = self.settled.entry(id.to_string()).or_insert(ts);
+                *end = (*end).max(ts);
+            }
+            if let Some(t) = self.thoughts.get(id)
+                && !self.closed.contains(id)
+                && self.settled.get(id).is_none_or(|end| Some(*end) < t.ts)
+            {
+                self.feed.insert(t.clone());
+            }
         }
         // A turn's end, and what starts the agent again: kept as the latest of
         // each, so the fold stays order-independent.
@@ -1329,6 +1382,58 @@ mod tests {
         m.apply_fact(&by(FactKind::Prompt("more".into()), "2026-06-05T10:02:00Z"));
         m.recompute_liveness(ts("2026-06-05T10:02:05Z"));
         assert_eq!(m.agent(MAIN_ID).unwrap().status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn a_thought_is_one_feed_entry_until_the_agent_settles() {
+        let at = |t: &str| t.parse::<DateTime<Utc>>().ok();
+        let fact = |kind, t: &str| Fact {
+            agent: Some(MAIN_ID.to_string()),
+            ts: at(t),
+            kind,
+        };
+        let thoughts = |m: &SessionModel| {
+            m.feed()
+                .filter(|e| e.kind == EntryKind::Thought)
+                .map(|e| e.text.clone())
+                .collect::<Vec<_>>()
+        };
+        let think = |text: &str, t| fact(FactKind::Reasoning(text.into()), t);
+        let mut m = SessionModel::new("s".into());
+        m.apply_fact(&think("ab", "2026-06-05T10:01:00Z"));
+        m.apply_fact(&think("a", "2026-06-05T10:01:00Z"));
+        assert_eq!(thoughts(&m), ["ab"]);
+        // A message or a turn's end at the same time settles it, and a thought
+        // folded after either stays out.
+        let ends = [
+            FactKind::Message("done".into()),
+            FactKind::Waiting,
+            FactKind::Prompt("more".into()),
+            FactKind::Ended(AgentStatus::Done),
+        ];
+        for end in ends {
+            let mut m = SessionModel::new("s".into());
+            m.apply_fact(&fact(end.clone(), "2026-06-05T10:01:00Z"));
+            m.apply_fact(&think("late", "2026-06-05T10:01:00Z"));
+            assert!(thoughts(&m).is_empty());
+            m.apply_fact(&think("next", "2026-06-05T10:02:00Z"));
+            assert_eq!(thoughts(&m), ["next"]);
+            m.apply_fact(&fact(end, "2026-06-05T10:03:00Z"));
+            assert!(thoughts(&m).is_empty());
+        }
+        // An ending with no time settles a thought from either side.
+        let undated = Fact {
+            ts: None,
+            ..fact(FactKind::Ended(AgentStatus::Done), "")
+        };
+        let mut m = SessionModel::new("s".into());
+        m.apply_fact(&think("a", "2026-06-05T10:01:00Z"));
+        m.apply_fact(&undated);
+        assert!(thoughts(&m).is_empty());
+        let mut m = SessionModel::new("s".into());
+        m.apply_fact(&undated);
+        m.apply_fact(&think("a", "2026-06-05T10:01:00Z"));
+        assert!(thoughts(&m).is_empty());
     }
 
     #[test]
