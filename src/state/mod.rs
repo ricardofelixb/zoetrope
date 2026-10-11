@@ -60,7 +60,8 @@ pub enum DetailView {
     /// failures and running tools stand alone. Nothing is dropped: `x` unfolds it.
     #[default]
     Activity,
-    /// The conversation as the agent had it, thinking and whole reports included.
+    /// The conversation as the agent had it, thinking and whole reports
+    /// included, and every tool call on a row of its own.
     Transcript,
 }
 

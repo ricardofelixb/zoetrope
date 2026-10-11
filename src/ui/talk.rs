@@ -327,12 +327,18 @@ fn inline_code(text: &str, style: Style, code: Style) -> Vec<Span<'static>> {
         .collect()
 }
 
-/// How many things `scope`'s conversation shows, to count the new ones.
+/// How many things `scope`'s conversation shows, to count the new ones. A
+/// call is one however it is grouped: a call that ends joins the group before
+/// it, which must not take a place from a message that came after.
 pub(crate) fn said(model: &SessionModel, scope: &str, view: DetailView) -> usize {
     items(model, scope, view)
         .iter()
-        .filter(|i| !matches!(i, Item::Entry(e) if e.kind == EntryKind::Thought))
-        .count()
+        .map(|item| match item {
+            Item::Entry(e) if e.kind == EntryKind::Thought => 0,
+            Item::Calls(_, calls) => calls.len(),
+            _ => 1,
+        })
+        .sum()
 }
 
 /// Whether `id` is `scope` or hangs somewhere below it.
@@ -409,8 +415,8 @@ fn log<'a>(model: &'a SessionModel, scope: &str) -> Vec<Item<'a>> {
 /// What the conversation shows, in time order. A job's root repeats each
 /// member's prompts as its own chapters, and a message told while an agent ran
 /// is in its session as a prompt that starts with it: neither is shown twice.
-/// The activity view leaves out thinking and adds the tool calls, runs of
-/// successful ones as one item.
+/// Tool calls are items in both views, each its own in the transcript; the
+/// activity view leaves out thinking and makes runs of successful ones one item.
 fn items<'a>(model: &'a SessionModel, scope: &str, view: DetailView) -> Vec<Item<'a>> {
     if conductor(model, scope) {
         return log(model, scope);
@@ -463,7 +469,7 @@ fn items<'a>(model: &'a SessionModel, scope: &str, view: DetailView) -> Vec<Item
         {
             items.push(Item::Started(id, agent.first_ts));
         }
-        if activity && within(model, id, scope) {
+        if within(model, id, scope) {
             items.extend(agent.tool_calls().map(|call| Item::Calls(id, vec![call])));
         }
     }
@@ -1206,9 +1212,38 @@ mod tests {
             assert!(whole.contains(call), "{call} in {whole}");
         }
 
-        let transcript = show(&model, MAIN_ID, true, DetailView::Transcript, now);
-        assert!(!transcript.contains("cargo") && !transcript.contains("tools"));
-        assert!(transcript.contains("Fixed the test."), "{transcript}");
+        // The transcript has the same calls, each on a row of its own and none
+        // folded, whether or not `x` is on.
+        for whole in [false, true] {
+            let transcript = show(&model, MAIN_ID, whole, DetailView::Transcript, now);
+            for call in [
+                "\u{2713} read a.rs\n",
+                "\u{2713} read b.rs\n",
+                "\u{2713} run cargo build\n",
+                "\u{2717} run cargo test \u{b7} 1m0s\n",
+                "\u{2713} edit b.rs\n",
+                "\u{25cf} run cargo clippy \u{b7} 2m0s\n",
+            ] {
+                assert!(transcript.contains(call), "{call:?} in {transcript}");
+            }
+            assert!(!transcript.contains(" tools \u{b7} "), "{transcript}");
+            assert!(transcript.contains("Fixed the test."), "{transcript}");
+        }
+    }
+
+    /// What is new while scrolled up is counted by call, not by group: a call
+    /// that ends joins the group before it, and a question after it is new.
+    #[test]
+    fn a_call_ending_into_a_group_does_not_hide_a_new_message() {
+        for view in [DetailView::Activity, DetailView::Transcript] {
+            let mut model = work();
+            let seen = said(&model, MAIN_ID, view);
+            finish(&mut model, 11, "c10", Outcome::Ok);
+            assert_eq!(said(&model, MAIN_ID, view), seen, "{view:?}: nothing new");
+            let ask = FactKind::Message("Shall I merge?".into());
+            apply(&mut model, MAIN_ID, 12, ask);
+            assert_eq!(said(&model, MAIN_ID, view), seen + 1, "{view:?}");
+        }
     }
 
     /// A call is running only while its agent is: after that it has no result
