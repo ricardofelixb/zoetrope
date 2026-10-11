@@ -706,10 +706,11 @@ fn render_help(frame: &mut Frame, area: Rect, palette: &rataflow::Palette) {
         ]),
         Line::from(vec![
             Span::styled(" panel     ", key),
-            Span::styled(
-                "j/k · pgup/pgdn scroll · v activity/transcript · x expand · esc close",
-                txt,
-            ),
+            Span::styled("j/k · pgup/pgdn scroll · esc close", txt),
+        ]),
+        Line::from(vec![
+            Span::styled(" view      ", key),
+            Span::styled("v activity/transcript · x expand", txt),
         ]),
         Line::from(vec![
             Span::styled(" timeline  ", key),
@@ -1138,5 +1139,32 @@ mod tests {
         // A workflow/journal subagent (meta with no tool_use_id) → its meta marks.
         let t = compute_scrubber_tally(&[meta_item(None)], 4, 0);
         assert!(t.spawn_at.iter().any(|&s| s), "meta birth marks ❋");
+    }
+
+    /// The help overlay as drawn, a row to a line, in a terminal of `width` by
+    /// `height`.
+    fn help(width: u16, height: u16) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| super::render_help(f, f.area(), &rataflow::Palette::DARK))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    /// The panel's keys are all readable at the overlay's widest, not clipped
+    /// at its edge: a row longer than the popup loses its end.
+    #[test]
+    fn help_shows_every_panel_key() {
+        let shown = help(120, 30).join("\n");
+        for key in ["scroll", "esc close", "v activity/transcript", "x expand"] {
+            assert!(shown.contains(key), "{key:?} in\n{shown}");
+        }
+        // The last row still fits the popup.
+        assert!(shown.contains("green edges = agent running"), "{shown}");
     }
 }
