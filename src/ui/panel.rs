@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use crate::state::session::AgentInfo;
 use crate::state::{App, DetailView};
 use crate::ui::nodes::fmt_tokens;
-use crate::ui::{talk, truncate};
+use crate::ui::{place_rows, talk, truncate};
 
 /// Render the detail panel for `agent_id` into `area`.
 ///
@@ -74,8 +74,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     };
 
     let tools = talk::tools(session, agent_id, inner.width as usize, now, &palette);
+    let header = header_lines(agent, now, inner.width as usize, &palette);
     let [header_area, talk_area, tools_area] = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(header.len().max(3) as u16),
         Constraint::Fill(1),
         Constraint::Length(u16::from(tools.is_some())),
     ])
@@ -132,7 +133,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
         return;
     }
 
-    render_header(frame, header_area, agent, now, &palette);
+    frame.render_widget(Paragraph::new(header).style(bg), header_area);
     frame.render_widget(talk_block, talk_area);
     let shown: Vec<Line> = if lines.is_empty() {
         vec![Line::styled("nothing said yet", bg.fg(palette.subtle))]
@@ -149,15 +150,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     }
 }
 
-fn render_header(
-    frame: &mut Frame,
-    area: Rect,
+/// The header's rows: name, status, where it works, and what it is for.
+fn header_lines(
     agent: &AgentInfo,
     now: Option<DateTime<Utc>>,
+    width: usize,
     palette: &rataflow::Palette,
-) {
+) -> Vec<Line<'static>> {
     let bg = Style::default().bg(palette.surface);
-    let width = area.width as usize;
 
     // Title: agent type, bold.
     let title = agent
@@ -187,6 +187,11 @@ fn render_header(
     }
     lines.push(Line::from(status));
 
+    // Where it works: its folder and branch, as its card says them.
+    for row in place_rows(agent.cwd.as_deref(), agent.branch.as_deref(), width) {
+        lines.push(Line::from(Span::styled(row, bg.fg(palette.subtle))));
+    }
+
     // What it is for, in one line: the conversation below has the rest.
     if let Some(desc) = agent.description.as_ref().filter(|d| !d.is_empty()) {
         let desc = desc.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -196,7 +201,7 @@ fn render_header(
         )));
     }
 
-    frame.render_widget(Paragraph::new(lines).style(bg), area);
+    lines
 }
 
 /// The panel's view, as tabs over the conversation: which one it is in, and the

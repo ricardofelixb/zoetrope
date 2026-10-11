@@ -41,6 +41,9 @@ pub struct AgentNode {
     /// The agent's latest message, shown in the description's place while it
     /// works: its status update.
     pub said: Option<String>,
+    /// The folder and git branch the agent works in, shown under the title.
+    pub cwd: Option<String>,
+    pub branch: Option<String>,
     pub status: AgentStatus,
     /// Number of tool calls (for the `⚒ N tools` line).
     pub tool_count: usize,
@@ -52,7 +55,7 @@ pub struct AgentNode {
     pub interactive: bool,
 }
 
-use crate::ui::truncate;
+use crate::ui::{place_rows, truncate};
 
 /// Compact human token count, e.g. `1.2k`, `34`, `2.0M`.
 pub(crate) fn fmt_tokens(n: u64) -> String {
@@ -144,6 +147,12 @@ impl NodeContent for AgentNode {
         let mut lines: Vec<Line> = Vec::new();
         lines.push(title_line);
 
+        let place = place_rows(self.cwd.as_deref(), self.branch.as_deref(), inner_w);
+        let placed = !place.is_empty();
+        for row in place {
+            lines.push(Line::from(Span::styled(row, bg_style.fg(palette.subtle))));
+        }
+
         let saying = self
             .said
             .as_ref()
@@ -156,19 +165,22 @@ impl NodeContent for AgentNode {
             lines.push(Line::from(Span::styled(desc, bg_style.fg(palette.subtle))));
         }
 
-        // Tools row: "⚒ N · last_tool".
-        let tools_text = if let Some(last) = self.last_tool.as_ref() {
-            let prefix = format!("⚒ {} · ", self.tool_count);
-            let budget =
-                inner_w.saturating_sub(unicode_width::UnicodeWidthStr::width(prefix.as_str()));
-            format!("{prefix}{}", truncate(last, budget))
-        } else {
-            format!("⚒ {} tools", self.tool_count)
-        };
-        lines.push(Line::from(Span::styled(
-            tools_text,
-            bg_style.fg(palette.accent),
-        )));
+        // Tools row: "⚒ N · last_tool". A placed card has no tools to count
+        // (a group's room goes to its place), so the row yields to the footer.
+        if !placed || self.tool_count > 0 {
+            let tools_text = if let Some(last) = self.last_tool.as_ref() {
+                let prefix = format!("⚒ {} · ", self.tool_count);
+                let budget =
+                    inner_w.saturating_sub(unicode_width::UnicodeWidthStr::width(prefix.as_str()));
+                format!("{prefix}{}", truncate(last, budget))
+            } else {
+                format!("⚒ {} tools", self.tool_count)
+            };
+            lines.push(Line::from(Span::styled(
+                tools_text,
+                bg_style.fg(palette.accent),
+            )));
+        }
 
         // Footer row: status word + token count, separated to the edges.
         let tokens = fmt_tokens(self.output_tokens);

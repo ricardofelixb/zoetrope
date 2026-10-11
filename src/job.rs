@@ -1028,7 +1028,10 @@ mod tests {
         let model = fold(&facts.iter().collect::<Vec<_>>());
         let group = model.agent("c").unwrap();
         assert_eq!(group.agent_type.as_deref(), Some("conductor"));
-        assert_eq!((&group.cwd, &group.branch, &group.description), (&None, &None, &None));
+        assert_eq!(
+            (&group.cwd, &group.branch, &group.description),
+            (&None, &None, &None)
+        );
     }
 
     #[test]
@@ -1037,9 +1040,8 @@ mod tests {
             r#"{"group":"c","cwd":"/old","branch":"dev","title":"old","ts":"2026-10-06T10:01:00Z"}"#,
         );
         // Fields a later line leaves out are not known to have gone.
-        let new = group_line(
-            r#"{"group":"c","cwd":"/new","title":"new","ts":"2026-10-06T10:02:00Z"}"#,
-        );
+        let new =
+            group_line(r#"{"group":"c","cwd":"/new","title":"new","ts":"2026-10-06T10:02:00Z"}"#);
         for order in [[&old, &new], [&new, &old]] {
             let facts: Vec<&Fact> = order.iter().flat_map(|f| f.iter()).collect();
             let model = fold(&facts);
@@ -1047,7 +1049,11 @@ mod tests {
             assert_eq!(group.cwd.as_deref(), Some("/new"));
             assert_eq!(group.branch.as_deref(), Some("dev"));
             assert_eq!(group.description.as_deref(), Some("new"));
-            assert_eq!(group.agent_type.as_deref(), Some("c"), "its key without a label");
+            assert_eq!(
+                group.agent_type.as_deref(),
+                Some("c"),
+                "its key without a label"
+            );
         }
     }
 

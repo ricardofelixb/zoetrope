@@ -678,9 +678,7 @@ mod tests {
             append(&dir.join(format!("{session}.jsonl")), &claude_line(key, 1));
             append(
                 &manifest,
-                &format!(
-                    r#"{{"member":"{key}","parent":"{parent}","path":"{session}.jsonl"}}"#
-                ),
+                &format!(r#"{{"member":"{key}","parent":"{parent}","path":"{session}.jsonl"}}"#),
             );
         }
         let model = fold(&read_job(&manifest));

@@ -80,6 +80,8 @@ fn content_matches(info: &AgentInfo, node: &AgentNode) -> bool {
     title_ok
         && node.description.as_deref() == info.description.as_deref()
         && node.said.as_deref() == info.said.as_ref().map(|s| s.excerpt.as_str())
+        && node.cwd == info.cwd
+        && node.branch == info.branch
         && node.status == info.status
         && node.tool_count == info.tool_calls.len()
         && node.last_tool.as_deref() == info.last_tool()
@@ -93,6 +95,8 @@ fn build_content(info: &AgentInfo) -> AgentNode {
         title: node_title(info),
         description: info.description.clone(),
         said: info.said.as_ref().map(|s| s.excerpt.clone()),
+        cwd: info.cwd.clone(),
+        branch: info.branch.clone(),
         status: info.status,
         tool_count: info.tool_calls.len(),
         last_tool: info.last_tool().map(str::to_string),

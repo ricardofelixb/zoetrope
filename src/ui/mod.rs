@@ -942,6 +942,55 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// [`truncate`], but cutting the head: a path is told apart by its end.
+pub(crate) fn truncate_start(s: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if max == 0 {
+        return String::new();
+    }
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let mut tail = Vec::new();
+    let mut w = 0;
+    for ch in s.chars().rev() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw > max - 1 {
+            break;
+        }
+        w += cw;
+        tail.push(ch);
+    }
+    std::iter::once('…').chain(tail.into_iter().rev()).collect()
+}
+
+/// `path` with the `home` directory it is under written `~`.
+pub(crate) fn shorten_home(path: &str, home: Option<&str>) -> String {
+    let rest = home
+        .map(std::path::Path::new)
+        .filter(|h| h.parent().is_some())
+        .and_then(|h| std::path::Path::new(path).strip_prefix(h).ok());
+    match rest {
+        None => path.to_string(),
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+    }
+}
+
+/// Where an agent works, as the rows a card and the panel show: its folder
+/// (under `~`, the tail kept) and `⎇ branch`, each at most `width` columns.
+pub(crate) fn place_rows(cwd: Option<&str>, branch: Option<&str>, width: usize) -> Vec<String> {
+    let home = crate::provider::home_dir();
+    let folder = cwd.filter(|c| !c.is_empty()).map(|c| {
+        let home = home.as_deref().and_then(|h| h.to_str());
+        truncate_start(&shorten_home(c, home), width)
+    });
+    let branch = branch
+        .filter(|b| !b.is_empty())
+        .map(|b| truncate(&format!("⎇ {b}"), width));
+    folder.into_iter().chain(branch).collect()
+}
+
 /// Greedy word-wrap `text` to lines of at most `width` display columns
 /// (unicode-width — CJK/emoji count 2), capped at `max_lines` (the last line
 /// gets a trailing `…` when content was dropped). Over-long words are
@@ -1024,7 +1073,10 @@ mod tests {
 
     #[test]
     fn truncate_start_keeps_the_tail() {
-        assert_eq!(truncate_start("~/Projects/zoetrope/web", 14), "…/zoetrope/web");
+        assert_eq!(
+            truncate_start("~/Projects/zoetrope/web", 14),
+            "…/zoetrope/web"
+        );
         assert_eq!(truncate_start("~/zoetrope", 10), "~/zoetrope");
         assert_eq!(truncate_start("~/zoetrope", 1), "…");
         assert_eq!(truncate_start("~/zoetrope", 0), "");
@@ -1037,9 +1089,15 @@ mod tests {
     #[test]
     fn home_is_shortened_to_a_tilde_by_whole_components() {
         let home = Some("/home/me");
-        assert_eq!(shorten_home("/home/me/zoetrope/web", home), "~/zoetrope/web");
+        assert_eq!(
+            shorten_home("/home/me/zoetrope/web", home),
+            "~/zoetrope/web"
+        );
         assert_eq!(shorten_home("/home/me", home), "~");
-        assert_eq!(shorten_home("/home/meow/zoetrope", home), "/home/meow/zoetrope");
+        assert_eq!(
+            shorten_home("/home/meow/zoetrope", home),
+            "/home/meow/zoetrope"
+        );
         assert_eq!(shorten_home("/srv/app", home), "/srv/app");
         assert_eq!(shorten_home("/home/me/zoetrope", None), "/home/me/zoetrope");
     }
