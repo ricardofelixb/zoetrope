@@ -638,6 +638,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A member cannot hang under itself, directly or through the members
+    /// under it: the line that would close the loop hangs under the job's root.
+    #[test]
+    fn a_member_never_hangs_under_itself() {
+        let dir = temp_dir("cycle");
+        let manifest = dir.join("cycle.jsonl");
+        append(&manifest, r#"{"zoe":"job","v":1,"id":"j"}"#);
+        for (key, parent, session) in [
+            ("a", "b", "11111111-1111-1111-1111-111111111111"),
+            ("b", "c", "22222222-2222-2222-2222-222222222222"),
+            ("c", "a", "33333333-3333-3333-3333-333333333333"),
+            ("d", "d", "44444444-4444-4444-4444-444444444444"),
+        ] {
+            append(&dir.join(format!("{session}.jsonl")), &claude_line(key, 1));
+            append(
+                &manifest,
+                &format!(
+                    r#"{{"member":"{key}","parent":"{parent}","path":"{session}.jsonl"}}"#
+                ),
+            );
+        }
+        let model = fold(&read_job(&manifest));
+        let parent = |id: &str| model.agent(id).unwrap().parent.clone();
+        assert_eq!(parent("a").as_deref(), Some("b"));
+        assert_eq!(parent("b").as_deref(), Some("c"));
+        assert_eq!(parent("c").as_deref(), Some(MAIN_ID), "closes the loop");
+        assert_eq!(parent("d").as_deref(), Some(MAIN_ID), "its own parent");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A line stating a member shows its key at once, whether or not the
     /// session it names can be opened yet.
     #[test]
