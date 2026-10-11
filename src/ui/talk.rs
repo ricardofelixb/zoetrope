@@ -14,7 +14,7 @@ use crate::state::DetailView;
 use crate::state::session::{
     AgentKind, AgentStatus, Entry, EntryKind, MAIN_ID, SessionModel, ToolCallInfo, ToolState,
 };
-use crate::ui::{split_at_width, truncate, wrap};
+use crate::ui::{truncate, wrap};
 
 /// Wrapped lines of a prompt shown before it folds; `x` shows prompts whole.
 const PROMPT_LINES: usize = 3;
@@ -706,17 +706,23 @@ fn drawable(line: &str) -> String {
         .collect()
 }
 
-/// `line` in pieces of at most `width` columns, cut where the width ends.
+/// `line` in pieces of at most `width` columns, cut where the width ends (but
+/// never short of one character). One pass, as `line` may be a megabyte.
 fn cut(line: &str, width: usize) -> Vec<String> {
-    use unicode_width::UnicodeWidthStr;
+    use unicode_width::UnicodeWidthChar;
     let mut pieces = Vec::new();
-    let mut rest = line;
-    while rest.width() > width {
-        let at = split_at_width(rest, width);
-        pieces.push(rest[..at].to_string());
-        rest = &rest[at..];
+    let mut piece = String::new();
+    let mut used = 0;
+    for ch in line.chars() {
+        let cols = ch.width().unwrap_or(0);
+        if used + cols > width && !piece.is_empty() {
+            pieces.push(std::mem::take(&mut piece));
+            used = 0;
+        }
+        piece.push(ch);
+        used += cols;
     }
-    pieces.push(rest.to_string());
+    pieces.push(piece);
     pieces
 }
 
@@ -1505,5 +1511,27 @@ mod tests {
         let (a, b) = (whole.find("read a.rs"), whole.find("read b.rs"));
         let (alpha, beta) = (whole.find("alpha text"), whole.find("beta text"));
         assert!(a < alpha && alpha < b && b < beta, "{whole}");
+    }
+
+    /// A line is cut into rows of the width and no more, whole characters
+    /// only, and a megabyte of it is a moment's work: every row is found in
+    /// one pass over the line, not by measuring what is left of it again.
+    #[test]
+    fn cut_wraps_a_long_line_in_one_pass() {
+        use unicode_width::UnicodeWidthStr;
+        let line = "x".repeat(1 << 20);
+        let started = std::time::Instant::now();
+        let rows = cut(&line, 64);
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        assert_eq!(rows.len(), (1 << 20) / 64);
+        assert!(rows.iter().all(|row| row.width() == 64));
+        assert_eq!(rows.concat(), line);
+
+        // A wide character that does not fit starts the next row, and one
+        // wider than the whole width still moves on.
+        assert_eq!(cut("ab\u{4e2d}c", 3), ["ab", "\u{4e2d}c"]);
+        assert_eq!(cut("\u{4e2d}\u{4e2d}", 1), ["\u{4e2d}", "\u{4e2d}"]);
+        assert_eq!(cut("", 5), [""]);
+        assert_eq!(cut("short", 5), ["short"]);
     }
 }
