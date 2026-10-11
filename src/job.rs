@@ -988,6 +988,53 @@ mod tests {
         }
     }
 
+    fn group_line(line: &str) -> Vec<Fact> {
+        let Some(Line::Group(group)) = parse_line(line) else {
+            panic!("expected a group: {line}");
+        };
+        group_statement(&group).facts
+    }
+
+    #[test]
+    fn a_group_says_where_it_works() {
+        let facts = group_line(
+            r#"{"group":"c","label":"conductor","cwd":"/home/me/zoetrope/web","branch":"main","title":"fix token refresh","ts":"2026-10-06T10:01:00Z"}"#,
+        );
+        let model = fold(&facts.iter().collect::<Vec<_>>());
+        let group = model.agent("c").unwrap();
+        assert_eq!(group.agent_type.as_deref(), Some("conductor"));
+        assert_eq!(group.cwd.as_deref(), Some("/home/me/zoetrope/web"));
+        assert_eq!(group.branch.as_deref(), Some("main"));
+        assert_eq!(group.description.as_deref(), Some("fix token refresh"));
+
+        // A line from before the fields existed states none of them.
+        let facts = group_line(r#"{"group":"c","label":"conductor","ts":"2026-10-06T10:01:00Z"}"#);
+        let model = fold(&facts.iter().collect::<Vec<_>>());
+        let group = model.agent("c").unwrap();
+        assert_eq!(group.agent_type.as_deref(), Some("conductor"));
+        assert_eq!((&group.cwd, &group.branch, &group.description), (&None, &None, &None));
+    }
+
+    #[test]
+    fn the_latest_group_line_replaces_its_fields_in_any_order() {
+        let old = group_line(
+            r#"{"group":"c","cwd":"/old","branch":"dev","title":"old","ts":"2026-10-06T10:01:00Z"}"#,
+        );
+        // Fields a later line leaves out are not known to have gone.
+        let new = group_line(
+            r#"{"group":"c","cwd":"/new","title":"new","ts":"2026-10-06T10:02:00Z"}"#,
+        );
+        for order in [[&old, &new], [&new, &old]] {
+            let facts: Vec<&Fact> = order.iter().flat_map(|f| f.iter()).collect();
+            let model = fold(&facts);
+            let group = model.agent("c").unwrap();
+            assert_eq!(group.cwd.as_deref(), Some("/new"));
+            assert_eq!(group.branch.as_deref(), Some("dev"));
+            assert_eq!(group.description.as_deref(), Some("new"));
+            assert_eq!(group.agent_type.as_deref(), Some("c"), "its key without a label");
+        }
+    }
+
     #[test]
     fn a_transcript_birth_does_not_show_a_removed_member() {
         let mut e = entry("plan");
