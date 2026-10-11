@@ -684,7 +684,7 @@ mod tests {
         model.apply_fact(&Fact {
             agent: Some("g".into()),
             ts: t(3),
-            kind: FactKind::Declared(None),
+            kind: FactKind::Declared(Default::default()),
         });
         assert!(sync(&mut flow, &model, false));
         assert!(flow.node("g").is_some() && flow.node("m").is_some());

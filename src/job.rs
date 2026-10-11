@@ -53,7 +53,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::fact::{AgentId, AgentKind, Fact, FactKind, Statement};
+use crate::fact::{AgentId, AgentKind, Declaration, Fact, FactKind, Statement};
 use crate::provider::Provider;
 use crate::state::session::MAIN_ID;
 
@@ -145,11 +145,20 @@ pub struct Told {
 }
 
 /// A group line: a node under the job's root that members hang under.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Group {
     pub group: String,
     #[serde(default)]
     pub label: Option<String>,
+    /// The folder the conductor works in.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Its git branch.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Its session's name, or else its first prompt.
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub ts: Option<DateTime<Utc>>,
 }
@@ -272,23 +281,24 @@ pub fn header_statements(header: &Header, manifest: &Path) -> Vec<Statement> {
     ]
 }
 
-/// A node stated by its manifest line at `ts`, with its title if the line has
-/// one: what shows it again after a `gone` before then.
-fn declaration(root: &str, ts: Option<DateTime<Utc>>, title: Option<String>) -> Fact {
+/// A node stated by its manifest line at `ts`, with what the line says of it:
+/// what shows it again after a `gone` before then.
+fn declaration(root: &str, ts: Option<DateTime<Utc>>, stated: Declaration) -> Fact {
     Fact {
         agent: Some(root.into()),
         ts,
-        kind: FactKind::Declared(title),
+        kind: FactKind::Declared(stated),
     }
 }
 
 /// A member root stated again, as when a later line names its session once more.
 pub fn redeclared(root: &str, ts: Option<DateTime<Utc>>) -> Statement {
-    declaration(root, ts, None).into()
+    declaration(root, ts, Declaration::default()).into()
 }
 
 /// What a group line states: the group under the job's root, titled by its
-/// label (its key when there is none).
+/// label (its key when there is none), described by its title, and placed by
+/// its folder and branch.
 pub fn group_statement(group: &Group) -> Statement {
     let fact = |kind| Fact {
         agent: Some(group.group.clone()),
@@ -309,7 +319,12 @@ pub fn group_statement(group: &Group) -> Statement {
             declaration(
                 &group.group,
                 group.ts,
-                Some(group.label.clone().unwrap_or_else(|| group.group.clone())),
+                Declaration {
+                    label: Some(group.label.clone().unwrap_or_else(|| group.group.clone())),
+                    description: group.title.clone(),
+                    cwd: group.cwd.clone(),
+                    branch: group.branch.clone(),
+                },
             ),
         ],
     }
@@ -363,7 +378,7 @@ impl Member {
                     ts: self.ts,
                     kind: self.birth_kind(),
                 },
-                declaration(&self.root, self.ts, None),
+                declaration(&self.root, self.ts, Declaration::default()),
             ],
         }
     }
@@ -940,8 +955,8 @@ mod tests {
         let group = |minute| {
             group_statement(&Group {
                 group: "c-1".into(),
-                label: None,
                 ts: at(minute),
+                ..Group::default()
             })
             .facts
         };
@@ -974,6 +989,7 @@ mod tests {
                 group: "c".into(),
                 label: Some(label.into()),
                 ts: at(minute),
+                ..Group::default()
             })
             .facts
         };

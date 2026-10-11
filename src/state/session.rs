@@ -11,7 +11,7 @@ use imbl::{HashMap, HashSet, OrdMap, OrdSet, Vector};
 
 use chrono::{DateTime, Utc};
 
-use crate::fact::{Fact, FactKind, Outcome};
+use crate::fact::{Declaration, Fact, FactKind, Outcome};
 
 /// Stable node id of the main (root) agent.
 pub const MAIN_ID: &str = "main";
@@ -78,12 +78,12 @@ pub struct SessionModel {
     /// EARLIER record than the call — this is the cross-record fallback for
     /// [`SpawnContext::reasoning`].
     last_reasoning: HashMap<String, String>,
-    /// The latest `Gone` and the latest `Declared` (with its title) of each
-    /// agent that has one. An agent is hidden while the first is the later (see
+    /// The latest `Gone` and the latest `Declared` (each field from the latest
+    /// declaration stating it) of each agent that has one. An agent is hidden while the first is the later (see
     /// [`hidden`](Self::hidden)); both are the latest by time, so the fold stays
     /// order-independent, and either may arrive before the agent exists.
     gone: OrdMap<String, DateTime<Utc>>,
-    declared: OrdMap<String, (DateTime<Utc>, Option<String>)>,
+    declared: OrdMap<String, (DateTime<Utc>, Declaration)>,
 }
 
 /// A notable timeline event for the scrubber's log line: a prompt (era
@@ -259,6 +259,9 @@ pub struct AgentInfo {
     pub agent_type: Option<String>,
     /// From `meta.description` or the `Agent` tool_use `input.description`.
     pub description: Option<String>,
+    /// The folder and git branch it works in, when its orchestrator states them.
+    pub cwd: Option<String>,
+    pub branch: Option<String>,
     /// Node id of the parent (`"main"` or a workflow id).
     pub parent: Option<String>,
     /// The `toolUseId` that spawned this agent — completion join key.
@@ -309,6 +312,20 @@ impl AgentInfo {
             .is_some_and(|ended| self.worked.is_none_or(|worked| ended >= worked))
     }
 
+    /// Take what its orchestrator declares of it.
+    fn declare(&mut self, declaration: &Declaration) {
+        let Declaration {
+            label,
+            description,
+            cwd,
+            branch,
+        } = declaration.clone();
+        self.agent_type = label.or(self.agent_type.take());
+        self.description = description.or(self.description.take());
+        self.cwd = cwd.or(self.cwd.take());
+        self.branch = branch.or(self.branch.take());
+    }
+
     /// A fresh agent record of the given kind, defaulting to
     /// [`AgentStatus::Running`] with no activity yet.
     pub(crate) fn new(kind: AgentKind) -> Self {
@@ -317,6 +334,8 @@ impl AgentInfo {
             interactive: kind == AgentKind::Main,
             agent_type: None,
             description: None,
+            cwd: None,
+            branch: None,
             parent: None,
             spawned_by: None,
             status: AgentStatus::Running,
@@ -409,8 +428,8 @@ impl SessionModel {
             info.agent_type = agent_type.clone();
             info.description = description.clone();
         }
-        if let Some((_, Some(title))) = self.declared.get(id) {
-            info.agent_type = Some(title.clone());
+        if let Some((_, declaration)) = self.declared.get(id) {
+            info.declare(declaration);
         }
         self.agents.insert(id.to_string(), info);
         self.spawn_order.push_back(id.to_string());
@@ -725,15 +744,20 @@ impl SessionModel {
                 }
             }
             FactKind::Prompt(_) | FactKind::Told(_) => {}
-            FactKind::Declared(title) => {
+            FactKind::Declared(stated) => {
                 if let Some(ts) = fact.ts {
-                    let now = (ts, title.clone());
-                    if self.declared.get(id).is_none_or(|old| *old < now) {
-                        if let (Some(title), Some(a)) = (title, self.agents.get_mut(id)) {
-                            a.agent_type = Some(title.clone());
-                        }
-                        self.declared.insert(id.to_string(), now);
+                    // The later of the two states what it states, the earlier
+                    // what the later leaves out, whichever arrived first.
+                    let stated = (ts, stated.clone());
+                    let merged = match self.declared.get(id) {
+                        Some(old) if *old >= stated => (old.0, old.1.clone().over(&stated.1)),
+                        Some(old) => (stated.0, stated.1.over(&old.1)),
+                        None => stated,
+                    };
+                    if let Some(a) = self.agents.get_mut(id) {
+                        a.declare(&merged.1);
                     }
+                    self.declared.insert(id.to_string(), merged);
                 }
             }
             FactKind::Gone => {
