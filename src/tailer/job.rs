@@ -48,6 +48,8 @@ pub(crate) struct JobFeed {
     events: HashMap<String, Vec<Event>>,
     /// How many sessions each key has, so a second one becomes `key~2`.
     per_key: HashMap<String, usize>,
+    /// The member each key last hung under, so no line closes a loop.
+    parents: HashMap<String, String>,
     ticks: u32,
 }
 
@@ -62,6 +64,7 @@ impl JobFeed {
             claimed: HashMap::new(),
             events: HashMap::new(),
             per_key: HashMap::new(),
+            parents: HashMap::new(),
             ticks: 0,
         }
     }
@@ -81,7 +84,8 @@ impl JobFeed {
                         }
                         Line::Header(_) => {}
                         // Stated now, though its session may be found later.
-                        Line::Member(entry) => {
+                        Line::Member(mut entry) => {
+                            self.keep_acyclic(&mut entry);
                             self.declare(&entry.member, &entry, out);
                             self.pending.push(entry);
                         }
@@ -183,6 +187,26 @@ impl JobFeed {
         for n in 1..=self.count(key) {
             out.push(job::redeclared(&root(key, n), entry.ts));
         }
+    }
+
+    /// Hang the member under the job's root instead of a parent that is, or
+    /// hangs under, the member itself.
+    fn keep_acyclic(&mut self, entry: &mut Entry) {
+        let mut at = entry.parent.as_deref();
+        for _ in 0..=self.parents.len() {
+            match at {
+                Some(key) if key == entry.member => {
+                    entry.parent = None;
+                    break;
+                }
+                Some(key) => at = self.parents.get(key).map(String::as_str),
+                None => break,
+            }
+        }
+        match &entry.parent {
+            Some(parent) => self.parents.insert(entry.member.clone(), parent.clone()),
+            None => self.parents.remove(&entry.member),
+        };
     }
 
     /// How many sessions have joined under `key`.
