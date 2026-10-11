@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::state::DetailView;
 use crate::state::session::{
     AgentKind, AgentStatus, Entry, EntryKind, MAIN_ID, SessionModel, ToolState,
 };
@@ -59,8 +60,11 @@ pub(crate) fn lines(
     scope: &str,
     width: usize,
     whole: bool,
+    view: DetailView,
+    now: Option<DateTime<Utc>>,
     palette: &rataflow::Palette,
 ) -> Vec<Line<'static>> {
+    let _ = (view, now);
     let job = crate::job::is_job_id(&model.session_id);
     let base =
         depth(model, scope) + usize::from(job && scope == MAIN_ID || conductor(model, scope));
@@ -231,7 +235,8 @@ fn inline_code(text: &str, style: Style, code: Style) -> Vec<Span<'static>> {
 }
 
 /// How many things `scope`'s conversation shows, to count the new ones.
-pub(crate) fn said(model: &SessionModel, scope: &str) -> usize {
+pub(crate) fn said(model: &SessionModel, scope: &str, view: DetailView) -> usize {
+    let _ = view;
     items(model, scope)
         .iter()
         .filter(|i| !matches!(i, Item::Entry(e) if e.kind == EntryKind::Thought))
@@ -635,6 +640,8 @@ mod tests {
             "review",
             100,
             false,
+            DetailView::Transcript,
+            None,
             &rataflow::Palette::DARK,
         ));
         assert!(shown.contains("  conductor\n"), "{shown}");
@@ -664,7 +671,15 @@ mod tests {
     /// The job's root shows everyone's, and its own copy of a prompt once.
     #[test]
     fn the_root_reads_as_the_whole_job() {
-        let shown = text(lines(&job(), MAIN_ID, 100, true, &rataflow::Palette::DARK));
+        let shown = text(lines(
+            &job(),
+            MAIN_ID,
+            100,
+            true,
+            DetailView::Transcript,
+            None,
+            &rataflow::Palette::DARK,
+        ));
         assert!(
             shown.contains("task\n") && shown.contains("Fix the bug"),
             "{shown}"
@@ -721,7 +736,15 @@ mod tests {
         let said = "Run `cargo test` now:\n```sh\ncargo   test\n```";
         apply(&mut model, MAIN_ID, 0, FactKind::Message(said.into()));
         let palette = rataflow::Palette::DARK;
-        let shown = lines(&model, MAIN_ID, 100, false, &palette);
+        let shown = lines(
+            &model,
+            MAIN_ID,
+            100,
+            false,
+            DetailView::Transcript,
+            None,
+            &palette,
+        );
         assert_eq!(
             text(shown.clone()),
             format!("{}  Run cargo test now:\n       cargo   test\n", hm(0))
@@ -739,7 +762,15 @@ mod tests {
         for (minute, said) in [(0, "one"), (0, "two"), (1, "three")] {
             apply(&mut model, MAIN_ID, minute, FactKind::Message(said.into()));
         }
-        let shown = text(lines(&model, MAIN_ID, 100, false, &rataflow::Palette::DARK));
+        let shown = text(lines(
+            &model,
+            MAIN_ID,
+            100,
+            false,
+            DetailView::Transcript,
+            None,
+            &rataflow::Palette::DARK,
+        ));
         assert_eq!(
             shown,
             format!("{}  one\n\n       two\n\n{}  three\n", hm(0), hm(1))
@@ -849,7 +880,15 @@ mod tests {
 
         assert!(conductor(&model, "c1"));
         assert!(!conductor(&model, MAIN_ID) && !conductor(&model, "review"));
-        let shown = text(lines(&model, "c1", 100, false, &rataflow::Palette::DARK));
+        let shown = text(lines(
+            &model,
+            "c1",
+            100,
+            false,
+            DetailView::Transcript,
+            None,
+            &rataflow::Palette::DARK,
+        ));
         assert!(shown.contains("conductor → review: Sol\n"), "{shown}");
         assert!(shown.contains("Review this change."), "{shown}");
         assert!(shown.contains("you → review: Sol\n"), "{shown}");
@@ -860,7 +899,15 @@ mod tests {
         }
         // The report is shown once however many turns end after it.
         apply(&mut model, "review", 6, FactKind::Waiting);
-        let again = text(lines(&model, "c1", 100, false, &rataflow::Palette::DARK));
+        let again = text(lines(
+            &model,
+            "c1",
+            100,
+            false,
+            DetailView::Transcript,
+            None,
+            &rataflow::Palette::DARK,
+        ));
         assert_eq!(again.matches("VERDICT: clean").count(), 1, "{again}");
         // The tool line still counts every call under the group.
         assert!(tools(&model, "c1", 80, None, &rataflow::Palette::DARK).is_some());
@@ -892,7 +939,15 @@ mod tests {
         let brief = FactKind::Prompt("Review this change.".into());
         apply(&mut model, "review", 1, brief);
         apply(&mut model, "review", 2, FactKind::Told("Review".into()));
-        let shown = text(lines(&model, "c1", 100, false, &rataflow::Palette::DARK));
+        let shown = text(lines(
+            &model,
+            "c1",
+            100,
+            false,
+            DetailView::Transcript,
+            None,
+            &rataflow::Palette::DARK,
+        ));
         assert!(shown.contains("Review this change."), "{shown}");
         assert!(shown.contains("you → review"), "{shown}");
     }

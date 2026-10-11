@@ -32,6 +32,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
         detail_follow,
         detail_down,
         detail_seen,
+        detail_view,
         whole_prompts,
         panel_drag,
         timeline,
@@ -88,6 +89,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
         agent_id,
         talk_inner.width as usize,
         *whole_prompts,
+        *detail_view,
+        now,
         &palette,
     );
 
@@ -105,7 +108,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     *detail_scroll = scroll;
     *detail_follow = follow;
     // Scrolled up, what has been said since is counted, as a chat would.
-    let said = talk::said(session, agent_id);
+    let said = talk::said(session, agent_id, *detail_view);
     let seen = *detail_seen.get_or_insert(said);
     if follow {
         *detail_seen = None;
