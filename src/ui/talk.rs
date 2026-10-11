@@ -913,6 +913,185 @@ mod tests {
         assert!(tools(&model, "c1", 80, None, &rataflow::Palette::DARK).is_some());
     }
 
+    /// `scope`'s panel text in `view`.
+    fn show(
+        model: &SessionModel,
+        scope: &str,
+        whole: bool,
+        view: DetailView,
+        now: Option<DateTime<Utc>>,
+    ) -> String {
+        text(lines(
+            model,
+            scope,
+            100,
+            whole,
+            view,
+            now,
+            &rataflow::Palette::DARK,
+        ))
+    }
+
+    fn start(model: &mut SessionModel, minute: u32, call: &str, name: &str, summary: &str) {
+        let start = FactKind::ToolStart {
+            call: call.into(),
+            name: name.into(),
+            summary: Some(summary.into()),
+        };
+        apply(model, MAIN_ID, minute, start);
+    }
+
+    fn finish(model: &mut SessionModel, minute: u32, call: &str, outcome: Outcome) {
+        let end = FactKind::ToolEnd {
+            call: call.into(),
+            outcome,
+        };
+        apply(model, MAIN_ID, minute, end);
+    }
+
+    /// A session worked in the order: read, read, build, a failed test, two
+    /// edits, a message, a read, and a check still running.
+    fn work() -> SessionModel {
+        let mut model = SessionModel::new("s".into());
+        apply(&mut model, MAIN_ID, 0, FactKind::Message("On it.".into()));
+        let calls = [
+            (1, "Read", "a.rs", Outcome::Ok),
+            (2, "Read", "b.rs", Outcome::Ok),
+            (3, "Bash", "cargo build", Outcome::Ok),
+            (4, "Bash", "cargo test", Outcome::Err),
+            (6, "Edit", "a.rs", Outcome::Ok),
+            (7, "Edit", "b.rs", Outcome::Ok),
+        ];
+        for (minute, name, summary, outcome) in calls {
+            let call = format!("c{minute}");
+            start(&mut model, minute, &call, name, summary);
+            // The failed test took a minute; the rest were over at once.
+            let took = u32::from(outcome == Outcome::Err);
+            finish(&mut model, minute + took, &call, outcome);
+        }
+        let said = FactKind::Message("Fixed the test.".into());
+        apply(&mut model, MAIN_ID, 8, said);
+        start(&mut model, 9, "c9", "Read", "c.rs");
+        finish(&mut model, 9, "c9", Outcome::Ok);
+        start(&mut model, 10, "c10", "Bash", "cargo clippy");
+        model
+    }
+
+    /// Activity runs of successful calls are one entry each, split by anything
+    /// else; a failure and a running call stand alone, at their place in time;
+    /// `x` lists every call. The transcript has none of it.
+    #[test]
+    fn activity_groups_successful_calls_and_keeps_the_rest_apart() {
+        let model = work();
+        let now = at(12);
+        let activity = show(&model, MAIN_ID, false, DetailView::Activity, now);
+        let order = [
+            "On it.",
+            "✓ 3 tools · read ×2 · run ×1 · x\n",
+            "✗ run cargo test · 1m0s\n",
+            "✓ 2 tools · edit ×2 · x\n",
+            "Fixed the test.",
+            "✓ read c.rs\n",
+            "● run cargo clippy · 2m0s\n",
+        ];
+        let mut from = 0;
+        for want in order {
+            let found = activity[from..].find(want);
+            assert!(found.is_some(), "{want:?} after {from} in {activity}");
+            from += found.unwrap() + want.len();
+        }
+        assert_eq!(activity.matches('✗').count(), 1, "{activity}");
+        assert!(!activity.contains("cargo build"), "{activity}");
+
+        let whole = show(&model, MAIN_ID, true, DetailView::Activity, now);
+        for call in ["read a.rs", "read b.rs", "run cargo build", "edit b.rs"] {
+            assert!(whole.contains(call), "{call} in {whole}");
+        }
+
+        let transcript = show(&model, MAIN_ID, true, DetailView::Transcript, now);
+        assert!(!transcript.contains("cargo") && !transcript.contains("tools"));
+        assert!(transcript.contains("Fixed the test."), "{transcript}");
+    }
+
+    /// A call is running only while its agent is: after that it has no result
+    /// on record, which is not a failure and not a success.
+    #[test]
+    fn a_call_that_never_ended_is_not_shown_running() {
+        let mut model = work();
+        apply(&mut model, MAIN_ID, 11, FactKind::Ended(AgentStatus::Done));
+        let shown = show(&model, MAIN_ID, false, DetailView::Activity, at(12));
+        assert!(
+            shown.contains("◌ run cargo clippy · no result\n"),
+            "{shown}"
+        );
+        assert!(!shown.contains('●'), "{shown}");
+    }
+
+    /// Thinking and a long brief give way to a line; the brief and the user's
+    /// words are whole when asked for or told, and the transcript keeps all.
+    #[test]
+    fn activity_leaves_out_thinking_and_folds_the_brief() {
+        let mut model = job();
+        let think = FactKind::Reasoning("Let me think.".into());
+        apply(&mut model, "review", 6, think);
+        let activity = show(&model, "review", false, DetailView::Activity, None);
+        assert!(
+            activity.contains("Task updated · conductor · 5 lines · x\n"),
+            "{activity}"
+        );
+        assert!(!activity.contains("Review this change."), "{activity}");
+        assert!(!activity.contains("Let me think."), "{activity}");
+        assert!(activity.contains("that finding is intended"), "{activity}");
+        assert!(activity.contains("VERDICT: clean"), "{activity}");
+
+        let root = show(&model, MAIN_ID, false, DetailView::Activity, None);
+        assert!(
+            root.contains("Task updated · conductor → review: someone · 5 lines"),
+            "{root}"
+        );
+        assert!(
+            root.contains("Fix the bug"),
+            "a short task reads as it is: {root}"
+        );
+
+        let whole = show(&model, "review", true, DetailView::Activity, None);
+        assert!(whole.contains("Review this change.") && whole.contains("four"));
+        assert!(!whole.contains("Task updated"), "{whole}");
+
+        let full = show(&model, "review", false, DetailView::Transcript, None);
+        assert!(full.contains("Let me think."), "{full}");
+        assert!(full.contains("… 2 more lines · x"), "{full}");
+        assert!(!full.contains("Task updated"), "{full}");
+    }
+
+    /// A long report is its first lines and its last, which is where an outcome
+    /// or a question to the reader ends up; a short one is whole.
+    #[test]
+    fn activity_previews_a_long_report_by_its_head_and_tail() {
+        let mut model = SessionModel::new("s".into());
+        let report: Vec<String> = (1..=19)
+            .map(|n| format!("step {n:02}"))
+            .chain(["Shall I merge?".to_string()])
+            .collect();
+        let short = report[..8].join("\n");
+        apply(&mut model, MAIN_ID, 0, FactKind::Message(short));
+        apply(&mut model, MAIN_ID, 1, FactKind::Message(report.join("\n")));
+        let activity = show(&model, MAIN_ID, false, DetailView::Activity, None);
+        assert!(activity.contains("step 08"), "short is whole: {activity}");
+        assert!(activity.contains("… 14 more lines · x"), "{activity}");
+        for kept in ["step 01", "step 04", "step 19", "Shall I merge?"] {
+            assert!(activity.contains(kept), "{kept} in {activity}");
+        }
+        assert!(!activity.contains("step 10"), "{activity}");
+
+        for whole in [
+            show(&model, MAIN_ID, true, DetailView::Activity, None),
+            show(&model, MAIN_ID, false, DetailView::Transcript, None),
+        ] {
+            assert!(whole.contains("step 10") && !whole.contains("more lines"));
+        }
+    }
+
     /// A tell sent after a brief does not take the brief away, however much of
     /// it the tell repeats.
     #[test]
