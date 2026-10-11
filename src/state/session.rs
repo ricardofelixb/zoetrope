@@ -79,9 +79,10 @@ pub struct SessionModel {
     /// [`SpawnContext::reasoning`].
     last_reasoning: HashMap<String, String>,
     /// The latest `Gone` and the latest `Declared` (each field from the latest
-    /// declaration stating it) of each agent that has one. An agent is hidden while the first is the later (see
-    /// [`hidden`](Self::hidden)); both are the latest by time, so the fold stays
-    /// order-independent, and either may arrive before the agent exists.
+    /// declaration stating it) of each agent that has one. An agent is hidden
+    /// while the first is the later (see [`hidden`](Self::hidden)); both are the
+    /// latest by time, so the fold stays order-independent, and either may
+    /// arrive before the agent exists.
     gone: OrdMap<String, DateTime<Utc>>,
     declared: OrdMap<String, (DateTime<Utc>, Declaration)>,
 }
