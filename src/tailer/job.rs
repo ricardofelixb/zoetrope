@@ -48,7 +48,7 @@ pub(crate) struct JobFeed {
     events: HashMap<String, Vec<Event>>,
     /// How many sessions each key has, so a second one becomes `key~2`.
     per_key: HashMap<String, usize>,
-    /// The member each key last hung under, so no line closes a loop.
+    /// The parent each root in the tree hangs under, so no session closes a loop.
     parents: HashMap<String, String>,
     ticks: u32,
 }
@@ -84,8 +84,7 @@ impl JobFeed {
                         }
                         Line::Header(_) => {}
                         // Stated now, though its session may be found later.
-                        Line::Member(mut entry) => {
-                            self.keep_acyclic(&mut entry);
+                        Line::Member(entry) => {
                             self.declare(&entry.member, &entry, out);
                             self.pending.push(entry);
                         }
@@ -160,7 +159,15 @@ impl JobFeed {
         }
         let count = self.per_key.entry(entry.member.clone()).or_default();
         *count += 1;
-        let member = Member::new(root(&entry.member, *count), entry);
+        let id = root(&entry.member, *count);
+        let mut entry = entry.clone();
+        if self.closes_a_loop(&id, entry.parent.as_deref()) {
+            entry.parent = None;
+        }
+        if let Some(parent) = &entry.parent {
+            self.parents.insert(id.clone(), parent.clone());
+        }
+        let member = Member::new(id, &entry);
         self.claimed.insert(key, member.root.clone());
         out.push(member.birth());
         out.push(member.session(session.provider, &session.id));
@@ -189,24 +196,16 @@ impl JobFeed {
         }
     }
 
-    /// Hang the member under the job's root instead of a parent that is, or
-    /// hangs under, the member itself.
-    fn keep_acyclic(&mut self, entry: &mut Entry) {
-        let mut at = entry.parent.as_deref();
-        for _ in 0..=self.parents.len() {
-            match at {
-                Some(key) if key == entry.member => {
-                    entry.parent = None;
-                    break;
-                }
-                Some(key) => at = self.parents.get(key).map(String::as_str),
-                None => break,
+    /// Whether `id` hanging under `parent` would close a loop: `parent` is
+    /// `id`, or hangs under it.
+    fn closes_a_loop<'a>(&'a self, id: &str, mut parent: Option<&'a str>) -> bool {
+        while let Some(at) = parent {
+            if at == id {
+                return true;
             }
+            parent = self.parents.get(at).map(String::as_str);
         }
-        match &entry.parent {
-            Some(parent) => self.parents.insert(entry.member.clone(), parent.clone()),
-            None => self.parents.remove(&entry.member),
-        };
+        false
     }
 
     /// How many sessions have joined under `key`.
