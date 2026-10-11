@@ -131,18 +131,17 @@ pub enum FactKind {
     Title(String),
     /// The agent (or group) is stated again by the orchestrator that runs it
     /// (a manifest line), which shows it again after a `Gone` before this time.
-    /// What the line says about it ([`Declaration`]) is the node's, the latest
-    /// declaration naming each field. Distinct from the agent's own records,
-    /// which never revive it.
-    Declared(Declaration),
+    /// A line that says more than that ([`Declaration`]) states the whole of
+    /// it: the latest such line is the node's, and what it leaves out is gone.
+    /// Distinct from the agent's own records, which never revive it.
+    Declared(Option<Declaration>),
     /// The agent (or group) is taken off the canvas, with everything under it,
     /// until it is stated again at a later time. Not a deletion: what it said
     /// stays folded.
     Gone,
 }
 
-/// What a manifest line says about a node besides that it exists. A line
-/// leaves out what it does not know, which is not a statement that it is gone.
+/// What a manifest line says about a node besides that it exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Declaration {
     /// The node's title: its `agent_type`.
@@ -153,18 +152,6 @@ pub struct Declaration {
     pub cwd: Option<String>,
     /// Its git branch.
     pub branch: Option<String>,
-}
-
-impl Declaration {
-    /// This declaration, with the fields it leaves out taken from an `older` one.
-    pub fn over(self, older: &Declaration) -> Declaration {
-        Declaration {
-            label: self.label.or_else(|| older.label.clone()),
-            description: self.description.or_else(|| older.description.clone()),
-            cwd: self.cwd.or_else(|| older.cwd.clone()),
-            branch: self.branch.or_else(|| older.branch.clone()),
-        }
-    }
 }
 
 /// What one record stated, and when the record itself was written.

@@ -688,7 +688,7 @@ mod tests {
         model.apply_fact(&Fact {
             agent: Some("g".into()),
             ts: t(3),
-            kind: FactKind::Declared(Default::default()),
+            kind: FactKind::Declared(None),
         });
         assert!(sync(&mut flow, &model, false));
         assert!(flow.node("g").is_some() && flow.node("m").is_some());
@@ -706,12 +706,12 @@ mod tests {
         let declare = |m, cwd: &str, title: &str| Fact {
             agent: Some("g".into()),
             ts: t(m),
-            kind: FactKind::Declared(Declaration {
+            kind: FactKind::Declared(Some(Declaration {
                 label: Some("conductor".into()),
                 description: Some(title.into()),
                 cwd: Some(cwd.into()),
                 branch: Some("main".into()),
-            }),
+            })),
         };
         let mut model = model_with_subagent();
         model.apply_fact(&Fact {

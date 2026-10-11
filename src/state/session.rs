@@ -78,13 +78,13 @@ pub struct SessionModel {
     /// EARLIER record than the call — this is the cross-record fallback for
     /// [`SpawnContext::reasoning`].
     last_reasoning: HashMap<String, String>,
-    /// The latest `Gone` and the latest `Declared` (each field from the latest
-    /// declaration stating it) of each agent that has one. An agent is hidden
+    /// The latest `Gone` and the latest `Declared` of each agent that has one.
+    /// An agent is hidden
     /// while the first is the later (see [`hidden`](Self::hidden)); both are the
     /// latest by time, so the fold stays order-independent, and either may
     /// arrive before the agent exists.
     gone: OrdMap<String, DateTime<Utc>>,
-    declared: OrdMap<String, (DateTime<Utc>, Declaration)>,
+    declared: OrdMap<String, (DateTime<Utc>, Option<Declaration>)>,
 }
 
 /// A notable timeline event for the scrubber's log line: a prompt (era
@@ -313,7 +313,8 @@ impl AgentInfo {
             .is_some_and(|ended| self.worked.is_none_or(|worked| ended >= worked))
     }
 
-    /// Take what its orchestrator declares of it.
+    /// Take what its orchestrator declares of it: all of it, so a field the
+    /// declaration leaves out is cleared.
     fn declare(&mut self, declaration: &Declaration) {
         let Declaration {
             label,
@@ -321,10 +322,10 @@ impl AgentInfo {
             cwd,
             branch,
         } = declaration.clone();
-        self.agent_type = label.or(self.agent_type.take());
-        self.description = description.or(self.description.take());
-        self.cwd = cwd.or(self.cwd.take());
-        self.branch = branch.or(self.branch.take());
+        self.agent_type = label;
+        self.description = description;
+        self.cwd = cwd;
+        self.branch = branch;
     }
 
     /// A fresh agent record of the given kind, defaulting to
@@ -429,7 +430,7 @@ impl SessionModel {
             info.agent_type = agent_type.clone();
             info.description = description.clone();
         }
-        if let Some((_, declaration)) = self.declared.get(id) {
+        if let Some((_, Some(declaration))) = self.declared.get(id) {
             info.declare(declaration);
         }
         self.agents.insert(id.to_string(), info);
@@ -747,18 +748,13 @@ impl SessionModel {
             FactKind::Prompt(_) | FactKind::Told(_) => {}
             FactKind::Declared(stated) => {
                 if let Some(ts) = fact.ts {
-                    // The later of the two states what it states, the earlier
-                    // what the later leaves out, whichever arrived first.
-                    let stated = (ts, stated.clone());
-                    let merged = match self.declared.get(id) {
-                        Some(old) if *old >= stated => (old.0, old.1.clone().over(&stated.1)),
-                        Some(old) => (stated.0, stated.1.over(&old.1)),
-                        None => stated,
-                    };
-                    if let Some(a) = self.agents.get_mut(id) {
-                        a.declare(&merged.1);
+                    let now = (ts, stated.clone());
+                    if self.declared.get(id).is_none_or(|old| *old < now) {
+                        if let (Some(declaration), Some(a)) = (stated, self.agents.get_mut(id)) {
+                            a.declare(declaration);
+                        }
+                        self.declared.insert(id.to_string(), now);
                     }
-                    self.declared.insert(id.to_string(), merged);
                 }
             }
             FactKind::Gone => {

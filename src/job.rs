@@ -23,8 +23,8 @@
 //! whose line is not read yet still hangs under it). A `parent` may also name
 //! another member, which hangs this member's root under that member's root
 //! card (its first session, when the key has run more than once), in whichever
-//! order their lines are read; a parent that would loop back to the member
-//! hangs it under the job's root. A `gone` line takes a group or member off the
+//! order their lines are read; the session that would close a loop (a parent that
+//! hangs under the member) hangs under the job's root instead. A `gone` line takes a group or member off the
 //! canvas and out of the counts, with everything under it, and a later `group`
 //! or member line for the same key shows it again, whichever order they are
 //! read in.
@@ -32,9 +32,9 @@
 //! A group says where its army works, in optional fields its card and panel
 //! show: `cwd` (the conductor's folder, absolute), `branch` (its git branch) and
 //! `title` (its session's name, or else its first prompt). A later `group` line
-//! for the same key replaces the fields it states and leaves the ones it omits,
-//! so a writer carries every field it knows forward; a line without them draws
-//! the group as before.
+//! for the same key replaces the earlier one's fields as a whole: a field it
+//! leaves out is gone, so a writer carries every field it knows forward. A line
+//! without them draws the group as before.
 //!
 //! ```text
 //! {"group":"conductor-1","label":"Claude (conductor)","cwd":"/home/me/zoetrope/web","branch":"main","title":"fix token refresh on resume","ts":"…"}
@@ -300,7 +300,7 @@ pub fn header_statements(header: &Header, manifest: &Path) -> Vec<Statement> {
 
 /// A node stated by its manifest line at `ts`, with what the line says of it:
 /// what shows it again after a `gone` before then.
-fn declaration(root: &str, ts: Option<DateTime<Utc>>, stated: Declaration) -> Fact {
+fn declaration(root: &str, ts: Option<DateTime<Utc>>, stated: Option<Declaration>) -> Fact {
     Fact {
         agent: Some(root.into()),
         ts,
@@ -310,7 +310,7 @@ fn declaration(root: &str, ts: Option<DateTime<Utc>>, stated: Declaration) -> Fa
 
 /// A member root stated again, as when a later line names its session once more.
 pub fn redeclared(root: &str, ts: Option<DateTime<Utc>>) -> Statement {
-    declaration(root, ts, Declaration::default()).into()
+    declaration(root, ts, None).into()
 }
 
 /// What a group line states: the group under the job's root, titled by its
@@ -336,12 +336,12 @@ pub fn group_statement(group: &Group) -> Statement {
             declaration(
                 &group.group,
                 group.ts,
-                Declaration {
+                Some(Declaration {
                     label: Some(group.label.clone().unwrap_or_else(|| group.group.clone())),
                     description: group.title.clone(),
                     cwd: group.cwd.clone(),
                     branch: group.branch.clone(),
-                },
+                }),
             ),
         ],
     }
@@ -395,7 +395,7 @@ impl Member {
                     ts: self.ts,
                     kind: self.birth_kind(),
                 },
-                declaration(&self.root, self.ts, Declaration::default()),
+                declaration(&self.root, self.ts, None),
             ],
         }
     }
