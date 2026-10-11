@@ -309,6 +309,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_groups_header_shows_its_place_before_its_title() {
+        let mut group = AgentInfo::new(crate::state::session::AgentKind::Group);
+        group.agent_type = Some("conductor".into());
+        group.cwd = Some("/srv/app/zoetrope/web".into());
+        group.branch = Some("main".into());
+        group.description = Some("fix   token refresh".into());
+        let palette = rataflow::Theme::Dark.palette();
+        let text = |lines: Vec<Line>| -> Vec<String> {
+            lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        };
+        let lines = text(header_lines(&group, None, 40, &palette));
+        assert_eq!(lines[0], "conductor");
+        assert_eq!(lines[2], "/srv/app/zoetrope/web");
+        assert_eq!(lines[3], "⎇ main");
+        assert_eq!(lines[4], "fix token refresh");
+        // A header with no place is the three rows it was.
+        group.cwd = None;
+        group.branch = None;
+        assert_eq!(header_lines(&group, None, 40, &palette).len(), 3);
+    }
+
     use chrono::TimeZone;
 
     fn agent_with_ts(first: Option<i64>, last: Option<i64>) -> AgentInfo {

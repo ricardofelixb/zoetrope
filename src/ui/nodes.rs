@@ -243,6 +243,69 @@ mod tests {
         assert_eq!(AgentStatus::Failed.glyph(), '✗');
     }
 
+    fn rows(buf: &Buffer, area: ratatui::layout::Rect) -> Vec<String> {
+        (0..area.height)
+            .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn card(node: AgentNode, area: ratatui::layout::Rect) -> Vec<String> {
+        use rataflow::Theme;
+        use rataflow::types::Position;
+
+        let ctx = NodeRenderContext {
+            id: "g",
+            area,
+            selected: false,
+            dragging: false,
+            position_absolute: Position::new(0.0, 0.0),
+            theme: Theme::default(),
+            animation_phase: 0,
+        };
+        let mut buf = Buffer::empty(area);
+        node.render(&ctx, &mut buf);
+        rows(&buf, area)
+    }
+
+    fn group_card() -> AgentNode {
+        AgentNode {
+            title: "conductor".into(),
+            description: Some("fix token refresh".into()),
+            said: None,
+            cwd: None,
+            branch: None,
+            status: AgentStatus::Running,
+            tool_count: 0,
+            last_tool: None,
+            output_tokens: 0,
+            interactive: false,
+        }
+    }
+
+    #[test]
+    fn a_group_card_shows_its_place_above_its_title() {
+        let area = ratatui::layout::Rect::new(0, 0, 30, 7);
+        let placed = AgentNode {
+            cwd: Some("/srv/app/zoetrope/web/frontend".into()),
+            branch: Some("main".into()),
+            ..group_card()
+        };
+        let text = card(placed, area);
+        // Under the label: the folder with its tail kept, the branch, the title,
+        // and still the status footer.
+        assert!(text[1].contains("conductor"), "{text:#?}");
+        assert!(text[2].contains("…app/zoetrope/web/frontend"), "{text:#?}");
+        assert!(text[3].contains("⎇ main"), "{text:#?}");
+        assert!(text[4].contains("fix token refresh"), "{text:#?}");
+        assert!(text[5].contains("running"), "{text:#?}");
+
+        // Without a place the card is what it was: description, tools, footer.
+        let text = card(group_card(), area);
+        assert!(text[2].contains("fix token refresh"), "{text:#?}");
+        assert!(text[3].contains("0 tools"), "{text:#?}");
+        assert!(text[4].contains("running"), "{text:#?}");
+    }
+
     fn render_into(area: ratatui::layout::Rect) -> Buffer {
         use rataflow::Theme;
         use rataflow::types::Position;
@@ -251,6 +314,8 @@ mod tests {
             title: "claude".into(),
             description: None,
             said: None,
+            cwd: None,
+            branch: None,
             status: AgentStatus::Done,
             tool_count: 3,
             last_tool: Some("Bash".into()),
