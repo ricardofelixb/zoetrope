@@ -23,7 +23,7 @@ pub mod discovery;
 pub mod wire;
 
 use crate::fact::{AgentKind, AgentStatus, Fact, FactKind, Outcome, Statement};
-use crate::provider::summary::{short_path, truncate_summary};
+use crate::provider::summary::{full_input, short_path, truncate_summary};
 use crate::state::session::MAIN_ID;
 use wire::{EventMsg, Item, Line, Payload, ResponseItem, SessionMeta, parse_line, path_leaf};
 
@@ -194,7 +194,7 @@ impl Stream {
                                 call: call.clone(),
                                 name: name.clone(),
                                 summary,
-                                input: None,
+                                input: fc.arguments.as_deref().and_then(whole_arguments),
                             }));
                             if is_spawn_tool(&name) {
                                 out.push(by(FactKind::Spawn {
@@ -204,13 +204,13 @@ impl Stream {
                             }
                         }
                     }
-                    ResponseItem::FunctionCallOutput { call_id, .. } => {
+                    ResponseItem::FunctionCallOutput { call_id, output } => {
                         // The format records no error flag on these outputs.
                         if let Some(call) = call_id {
                             out.push(by(FactKind::ToolEnd {
                                 call: call.clone(),
                                 outcome: Outcome::Ok,
-                                output: None,
+                                output: output.as_ref().and_then(full_input),
                             }));
                         }
                     }
@@ -222,7 +222,7 @@ impl Stream {
                                 call: call.clone(),
                                 name,
                                 summary,
-                                input: None,
+                                input: tc.input.clone().filter(|program| !program.is_empty()),
                             }));
                         }
                     }
@@ -239,7 +239,7 @@ impl Stream {
                             out.push(by(FactKind::ToolEnd {
                                 call: call.clone(),
                                 outcome,
-                                output: None,
+                                output: output.text(),
                             }));
                         }
                     }
@@ -313,7 +313,12 @@ impl Stream {
     fn item_facts(&self, owner: &str, ic: &wire::ItemCompleted, out: &mut Vec<Fact>) {
         let started = ic.started_at();
         let completed = ic.completed_at();
-        let mut ran = |call: &Option<String>, name: String, summary: Option<String>, outcome| {
+        let mut ran = |call: &Option<String>,
+                       name: String,
+                       summary: Option<String>,
+                       input: Option<String>,
+                       outcome,
+                       output: Option<String>| {
             let Some(call) = call else { return };
             out.push(Fact {
                 agent: Some(owner.to_string()),
@@ -322,7 +327,7 @@ impl Stream {
                     call: call.clone(),
                     name,
                     summary,
-                    input: None,
+                    input,
                 },
             });
             out.push(Fact {
@@ -331,7 +336,7 @@ impl Stream {
                 kind: FactKind::ToolEnd {
                     call: call.clone(),
                     outcome,
-                    output: None,
+                    output,
                 },
             });
         };
@@ -350,7 +355,15 @@ impl Stream {
                     (_, Some(code)) if code != 0 => Outcome::Err,
                     _ => Outcome::Ok,
                 };
-                ran(&c.id, name, summary, outcome);
+                let output = c.aggregated_output.clone().filter(|text| !text.is_empty());
+                ran(
+                    &c.id,
+                    name,
+                    summary,
+                    Some(c.display_command()),
+                    outcome,
+                    output,
+                );
             }
             Item::Extension(e) => {
                 let name = e.kind.clone().unwrap_or_else(|| "extension".into());
@@ -359,7 +372,7 @@ impl Stream {
                     Some("failed") => Outcome::Err,
                     _ => Outcome::Ok,
                 };
-                ran(&e.id, name, summary, outcome);
+                ran(&e.id, name, summary, e.query.clone(), outcome, None);
             }
             Item::FileChange(f) => {
                 let files: Vec<String> = f
@@ -368,11 +381,12 @@ impl Stream {
                     .map(|p| short_path(p, self.cwd.as_deref()))
                     .collect();
                 let summary = (!files.is_empty()).then(|| truncate_summary(&files.join(", ")));
+                let input = (!files.is_empty()).then(|| files.join("\n"));
                 let outcome = match f.status.as_deref() {
                     Some("failed") => Outcome::Err,
                     _ => Outcome::Ok,
                 };
-                ran(&f.id, "apply_patch".into(), summary, outcome);
+                ran(&f.id, "apply_patch".into(), summary, input, outcome, None);
             }
             Item::SubAgentActivity(a) => {
                 let Some(child) = &a.agent_thread_id else {
@@ -463,6 +477,15 @@ fn command_kind_name(kind: &str) -> &str {
         "search" => "search",
         "list_files" => "list",
         _ => "shell",
+    }
+}
+
+/// A function call's arguments as the whole input: the JSON by key, else as
+/// written.
+fn whole_arguments(arguments: &str) -> Option<String> {
+    match serde_json::from_str(arguments) {
+        Ok(value) => full_input(&value),
+        Err(_) => Some(arguments.to_string()),
     }
 }
 

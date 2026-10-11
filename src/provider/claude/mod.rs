@@ -20,11 +20,11 @@ pub mod discovery;
 pub mod wire;
 
 use crate::fact::{AgentKind, AgentStatus, Fact, FactKind, Outcome, Statement};
-use crate::provider::summary::{short_path, truncate_summary};
+use crate::provider::summary::{full_input, short_path, truncate_summary};
 use crate::state::session::MAIN_ID;
 use wire::{
-    AgentToolInput, ContentBlock, Entry, SubagentMeta, TaskStatus, UserContent, UserContentBlock,
-    is_spawn_tool, parse_line, parse_task_notification,
+    AgentToolInput, ContentBlock, Entry, SubagentMeta, TaskStatus, ToolResultContent, UserContent,
+    UserContentBlock, is_spawn_tool, parse_line, parse_task_notification,
 };
 
 /// Which file a line came from. Claude spreads one session over a main
@@ -279,7 +279,7 @@ fn facts_after(source: &Source, entry: &Entry, carried: &mut Option<String>) -> 
                                 call: call.clone(),
                                 name: name.clone(),
                                 summary,
-                                input: None,
+                                input: full_input(&tu.input),
                             }));
                             if is_spawn_tool(&name) {
                                 out.push(about(FactKind::Spawn {
@@ -358,13 +358,18 @@ fn facts_after(source: &Source, entry: &Entry, carried: &mut Option<String>) -> 
                         } else {
                             Outcome::Ok
                         };
+                        let output = r
+                            .content
+                            .as_ref()
+                            .map(ToolResultContent::text)
+                            .filter(|text| !text.is_empty());
                         out.push(Fact {
                             agent: Some(owner.clone()),
                             ts,
                             kind: FactKind::ToolEnd {
                                 call: call.clone(),
                                 outcome,
-                                output: None,
+                                output,
                             },
                         });
                     }

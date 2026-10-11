@@ -12,7 +12,7 @@ pub mod discovery;
 pub mod wire;
 
 use crate::fact::{AgentKind, Fact, FactKind, Outcome, Statement};
-use crate::provider::summary::{short_path, truncate_summary};
+use crate::provider::summary::{full_input, short_path, truncate_summary};
 use crate::state::session::MAIN_ID;
 use wire::{Block, Line, parse_line};
 
@@ -104,7 +104,7 @@ impl Stream {
                                             call: id.clone(),
                                             name: name.clone(),
                                             summary: summarize(arguments, self.cwd.as_deref()),
-                                            input: None,
+                                            input: full_input(arguments),
                                         }));
                                     }
                                     _ => {}
@@ -118,6 +118,7 @@ impl Stream {
                         }
                     }
                     "toolResult" => out.extend(m.tool_call_id.clone().map(|call| {
+                        let output = Some(m.content.text()).filter(|text| !text.is_empty());
                         by(FactKind::ToolEnd {
                             call,
                             outcome: if m.is_error {
@@ -125,7 +126,7 @@ impl Stream {
                             } else {
                                 Outcome::Ok
                             },
-                            output: None,
+                            output,
                         })
                     })),
                     _ => {}

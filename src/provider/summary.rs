@@ -21,6 +21,27 @@ pub(crate) fn truncate_summary(s: &str) -> String {
     }
 }
 
+/// A tool's whole input as text, which the summary is a cut of: a string as
+/// it is, an object as a `key: value` line per field (a string value as
+/// written, anything else as JSON), and nothing for an empty input.
+pub(crate) fn full_input(input: &serde_json::Value) -> Option<String> {
+    use serde_json::Value;
+    let text = match input {
+        Value::Null => return None,
+        Value::String(s) => s.clone(),
+        Value::Object(fields) => fields
+            .iter()
+            .map(|(key, value)| match value {
+                Value::String(s) => format!("{key}: {s}"),
+                other => format!("{key}: {other}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_string(),
+    };
+    (!text.is_empty()).then_some(text)
+}
+
 /// A file path, made readable for the panel: relative to `cwd` when it lives
 /// under the project root, and truncated keeping the BASENAME (not the root) if
 /// it's still long — `…/state/timeline.rs`, never `/Users/.../src/sta…`.
