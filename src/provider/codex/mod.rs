@@ -23,7 +23,7 @@ pub mod discovery;
 pub mod wire;
 
 use crate::fact::{AgentKind, AgentStatus, Fact, FactKind, Outcome, Statement};
-use crate::provider::summary::{short_path, truncate_summary};
+use crate::provider::summary::{full_input, short_path, truncate_summary};
 use crate::state::session::MAIN_ID;
 use wire::{EventMsg, Item, Line, Payload, ResponseItem, SessionMeta, parse_line, path_leaf};
 
@@ -194,6 +194,7 @@ impl Stream {
                                 call: call.clone(),
                                 name: name.clone(),
                                 summary,
+                                input: fc.arguments.as_deref().and_then(whole_arguments),
                             }));
                             if is_spawn_tool(&name) {
                                 out.push(by(FactKind::Spawn {
@@ -203,12 +204,13 @@ impl Stream {
                             }
                         }
                     }
-                    ResponseItem::FunctionCallOutput { call_id, .. } => {
+                    ResponseItem::FunctionCallOutput { call_id, output } => {
                         // The format records no error flag on these outputs.
                         if let Some(call) = call_id {
                             out.push(by(FactKind::ToolEnd {
                                 call: call.clone(),
                                 outcome: Outcome::Ok,
+                                output: output.as_ref().and_then(full_input),
                             }));
                         }
                     }
@@ -220,6 +222,7 @@ impl Stream {
                                 call: call.clone(),
                                 name,
                                 summary,
+                                input: tc.input.clone().filter(|program| !program.is_empty()),
                             }));
                         }
                     }
@@ -236,6 +239,7 @@ impl Stream {
                             out.push(by(FactKind::ToolEnd {
                                 call: call.clone(),
                                 outcome,
+                                output: output.text(),
                             }));
                         }
                     }
@@ -309,7 +313,12 @@ impl Stream {
     fn item_facts(&self, owner: &str, ic: &wire::ItemCompleted, out: &mut Vec<Fact>) {
         let started = ic.started_at();
         let completed = ic.completed_at();
-        let mut ran = |call: &Option<String>, name: String, summary: Option<String>, outcome| {
+        let mut ran = |call: &Option<String>,
+                       name: String,
+                       summary: Option<String>,
+                       input: Option<String>,
+                       outcome,
+                       output: Option<String>| {
             let Some(call) = call else { return };
             out.push(Fact {
                 agent: Some(owner.to_string()),
@@ -318,6 +327,7 @@ impl Stream {
                     call: call.clone(),
                     name,
                     summary,
+                    input,
                 },
             });
             out.push(Fact {
@@ -326,6 +336,7 @@ impl Stream {
                 kind: FactKind::ToolEnd {
                     call: call.clone(),
                     outcome,
+                    output,
                 },
             });
         };
@@ -344,7 +355,15 @@ impl Stream {
                     (_, Some(code)) if code != 0 => Outcome::Err,
                     _ => Outcome::Ok,
                 };
-                ran(&c.id, name, summary, outcome);
+                let output = c.aggregated_output.clone().filter(|text| !text.is_empty());
+                ran(
+                    &c.id,
+                    name,
+                    summary,
+                    Some(c.display_command()),
+                    outcome,
+                    output,
+                );
             }
             Item::Extension(e) => {
                 let name = e.kind.clone().unwrap_or_else(|| "extension".into());
@@ -353,7 +372,7 @@ impl Stream {
                     Some("failed") => Outcome::Err,
                     _ => Outcome::Ok,
                 };
-                ran(&e.id, name, summary, outcome);
+                ran(&e.id, name, summary, e.query.clone(), outcome, None);
             }
             Item::FileChange(f) => {
                 let files: Vec<String> = f
@@ -362,11 +381,19 @@ impl Stream {
                     .map(|p| short_path(p, self.cwd.as_deref()))
                     .collect();
                 let summary = (!files.is_empty()).then(|| truncate_summary(&files.join(", ")));
+                let patch: Vec<String> = f.changes.iter().map(|(p, c)| patch_text(p, c)).collect();
+                let input = (!patch.is_empty()).then(|| patch.join("\n"));
+                let printed: Vec<&str> = [&f.stdout, &f.stderr]
+                    .into_iter()
+                    .filter_map(|text| text.as_deref())
+                    .filter(|text| !text.is_empty())
+                    .collect();
+                let output = (!printed.is_empty()).then(|| printed.join("\n"));
                 let outcome = match f.status.as_deref() {
                     Some("failed") => Outcome::Err,
                     _ => Outcome::Ok,
                 };
-                ran(&f.id, "apply_patch".into(), summary, outcome);
+                ran(&f.id, "apply_patch".into(), summary, input, outcome, output);
             }
             Item::SubAgentActivity(a) => {
                 let Some(child) = &a.agent_thread_id else {
@@ -458,6 +485,30 @@ fn command_kind_name(kind: &str) -> &str {
         "list_files" => "list",
         _ => "shell",
     }
+}
+
+/// A function call's arguments as the whole input: the JSON by key, else as
+/// written.
+fn whole_arguments(arguments: &str) -> Option<String> {
+    match serde_json::from_str(arguments) {
+        Ok(value) => full_input(&value),
+        Err(_) => Some(arguments.to_string()),
+    }
+}
+
+/// One file's change as a patch reads: what was done to the file, where it
+/// moved to, then its diff (or, for a new file, its content).
+fn patch_text(path: &str, change: &serde_json::Value) -> String {
+    let text = |key: &str| change.get(key).and_then(serde_json::Value::as_str);
+    let mut out = format!("{} {path}", text("type").unwrap_or("change"));
+    if let Some(to) = text("move_path") {
+        out.push_str(&format!(" -> {to}"));
+    }
+    if let Some(body) = text("unified_diff").or(text("content")) {
+        out.push('\n');
+        out.push_str(body);
+    }
+    out
 }
 
 /// One line for a collaboration or built-in function call.
@@ -642,7 +693,7 @@ mod tests {
         let start = s.push(r#"{"timestamp":"2026-08-26T16:10:54.748Z","ordinal":1,"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_1","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"cargo test\", \"workdir\":\"/p\"});"}}"#).unwrap();
         assert!(matches!(
             &start.facts[0].kind,
-            FactKind::ToolStart { call, name, summary } if call == "call_1" && name == "exec" && summary.as_deref() == Some("cargo test")
+            FactKind::ToolStart { call, name, summary, .. } if call == "call_1" && name == "exec" && summary.as_deref() == Some("cargo test")
         ));
         let ran = s.push(r#"{"timestamp":"2026-08-26T16:10:54.934Z","ordinal":2,"type":"event_msg","payload":{"type":"item_completed","thread_id":"a","item":{"type":"CommandExecution","id":"exec-1","command":["/bin/zsh","-lc","cargo test"],"parsed_cmd":[{"type":"unknown","cmd":"cargo test"}],"status":"failed","exit_code":101},"started_at_ms":1787760650000,"completed_at_ms":1787760654000}}"#).unwrap();
         assert!(
@@ -658,7 +709,7 @@ mod tests {
         assert!(ran.facts[0].ts < ran.facts[1].ts, "start before end");
         let end = s.push(r#"{"timestamp":"2026-08-26T16:10:54.947Z","ordinal":3,"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_1","output":[{"type":"input_text","text":"Script completed\nWall time 0.2 seconds\nOutput:\n"}]}}"#).unwrap();
         assert!(
-            matches!(&end.facts[0].kind, FactKind::ToolEnd { call, outcome: Outcome::Ok } if call == "call_1")
+            matches!(&end.facts[0].kind, FactKind::ToolEnd { call, outcome: Outcome::Ok, .. } if call == "call_1")
         );
         let host = s.push(r#"{"timestamp":"2026-08-26T16:10:55.947Z","ordinal":4,"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_2","output":[{"type":"input_text","text":"timed out negotiating with the code-mode host"}]}}"#).unwrap();
         assert!(matches!(
@@ -723,5 +774,112 @@ mod tests {
             ),
             "apply_patch: app.js, theme.js"
         );
+    }
+
+    /// Every kind of call keeps its whole input and the text of its result.
+    #[test]
+    fn calls_keep_their_whole_input_and_output() {
+        let mut s = Stream::new();
+        s.push(r#"{"ordinal":0,"type":"session_meta","payload":{"id":"a","session_id":"a","source":"cli","thread_source":"user"}}"#);
+        let facts = |s: &mut Stream, line: &str| s.push(line).unwrap().facts;
+        // The `exec` program, and the parts its output came back in.
+        let start = facts(
+            &mut s,
+            r#"{"timestamp":"2026-08-26T16:10:54.748Z","ordinal":1,"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_1","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"cargo test\"});\nr;"}}"#,
+        );
+        assert!(matches!(
+            &start[0].kind,
+            FactKind::ToolStart { input: Some(i), .. } if i == "const r = await tools.exec_command({\"cmd\":\"cargo test\"});\nr;"
+        ));
+        let end = facts(
+            &mut s,
+            r#"{"timestamp":"2026-08-26T16:10:54.947Z","ordinal":2,"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_1","output":[{"type":"input_text","text":"Script completed\n"},{"type":"input_text","text":"Output:\nok"}]}}"#,
+        );
+        assert!(matches!(
+            &end[0].kind,
+            FactKind::ToolEnd { output: Some(o), .. } if o == "Script completed\n\nOutput:\nok"
+        ));
+        // A command that ran, whole, and everything it printed.
+        let ran = facts(
+            &mut s,
+            r#"{"timestamp":"2026-08-26T16:10:55.934Z","ordinal":3,"type":"event_msg","payload":{"type":"item_completed","thread_id":"a","item":{"type":"CommandExecution","id":"exec-1","command":["/bin/zsh","-lc","cargo test -- --nocapture"],"parsed_cmd":[],"status":"failed","exit_code":101,"aggregated_output":"error[E0308]: mismatched types\n  --> src/lib.rs:3"},"started_at_ms":1787760650000,"completed_at_ms":1787760654000}}"#,
+        );
+        assert!(matches!(
+            &ran[0].kind,
+            FactKind::ToolStart { input: Some(i), .. } if i == "cargo test -- --nocapture"
+        ));
+        assert!(matches!(
+            &ran[1].kind,
+            FactKind::ToolEnd { output: Some(o), .. } if o == "error[E0308]: mismatched types\n  --> src/lib.rs:3"
+        ));
+        // A built-in tool: its arguments by key, and its output as written.
+        let call = facts(
+            &mut s,
+            r#"{"timestamp":"2026-08-26T16:13:35.485Z","ordinal":4,"type":"response_item","payload":{"type":"function_call","name":"send_message","arguments":"{\"to\":\"worker\",\"text\":\"go\"}","call_id":"call_m"}}"#,
+        );
+        assert!(matches!(
+            &call[0].kind,
+            FactKind::ToolStart { input: Some(i), .. } if i == "text: go\nto: worker"
+        ));
+        let out = facts(
+            &mut s,
+            r#"{"timestamp":"2026-08-26T16:13:58.376Z","ordinal":5,"type":"response_item","payload":{"type":"function_call_output","call_id":"call_m","output":"sent"}}"#,
+        );
+        assert!(matches!(
+            &out[0].kind,
+            FactKind::ToolEnd { output: Some(o), .. } if o == "sent"
+        ));
+    }
+
+    /// A patch keeps its diff, and what it printed, as the capture has them:
+    /// each changed file named with what was done to it, then its diff (or,
+    /// for a new file, its content), and stdout and stderr as output.
+    #[test]
+    fn a_patch_keeps_its_diff_and_what_it_printed() {
+        let Some(dir) = crate::provider::harness::fixture_dir("codex") else {
+            return;
+        };
+        let mut patches = 0;
+        for fixture in std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()) {
+            if !fixture.is_dir() {
+                continue;
+            }
+            for rollout in discovery::all_rollouts(&fixture) {
+                let text = std::fs::read_to_string(&rollout).unwrap();
+                let mut stream = Stream::new();
+                for line in text.lines() {
+                    let statement = stream.push(line);
+                    if !line.contains(r#""type":"FileChange""#) {
+                        continue;
+                    }
+                    let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                    let item = &record["payload"]["item"];
+                    let facts = statement.expect("a patch states its facts").facts;
+                    let input = facts.iter().find_map(|f| match &f.kind {
+                        FactKind::ToolStart { input, .. } => input.clone(),
+                        _ => None,
+                    });
+                    let output = facts.iter().find_map(|f| match &f.kind {
+                        FactKind::ToolEnd { output, .. } => output.clone(),
+                        _ => None,
+                    });
+                    let input = input.expect("the patch is its input");
+                    for (path, change) in item["changes"].as_object().unwrap() {
+                        let kind = change["type"].as_str().unwrap();
+                        assert!(input.contains(&format!("{kind} {path}")), "{input}");
+                        let body = change["unified_diff"]
+                            .as_str()
+                            .or(change["content"].as_str())
+                            .unwrap();
+                        assert!(input.contains(body), "{path}: {input}");
+                    }
+                    let stdout = item["stdout"].as_str().unwrap_or_default();
+                    let output = output.unwrap_or_default();
+                    assert!(output.contains(stdout), "{output:?} lacks {stdout:?}");
+                    patches += 1;
+                }
+            }
+        }
+        assert!(patches > 0, "no patch in the captures");
     }
 }

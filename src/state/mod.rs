@@ -51,6 +51,30 @@ pub enum Camera {
     Manual,
 }
 
+/// What the detail panel shows of an agent: what changed, or everything.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DetailView {
+    /// The default: what the agent is doing, what it changed and whether it
+    /// needs the reader. Thinking is left out, a long brief is one line, long
+    /// reports are previewed and runs of successful tool calls are one entry;
+    /// failures and running tools stand alone. Nothing is dropped: `x` unfolds it.
+    #[default]
+    Activity,
+    /// The conversation as the agent had it, thinking and whole reports
+    /// included, and every tool call on a row of its own.
+    Transcript,
+}
+
+impl DetailView {
+    /// The other view.
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Activity => Self::Transcript,
+            Self::Transcript => Self::Activity,
+        }
+    }
+}
+
 /// The zoom floor centering engages at (Follow tracking and click-to-center)
 /// — cards must be readable.
 pub const FOLLOW_ZOOM: f64 = 1.0;
@@ -169,13 +193,15 @@ pub struct App {
     /// Scroll offset for the selected agent's tool-call list in the detail
     /// panel. The renderer clamps this to the real maximum and writes it back, so
     /// it always reflects the actual top line (the scroll indicator reads it).
-    pub detail_scroll: u16,
+    pub detail_scroll: usize,
     /// Whether the detail panel auto-tails (bottom-anchors to the newest tool
     /// call). True by default and after selecting an agent; scrolling up detaches
     /// it; scrolling back to the bottom re-attaches. Independent of the camera.
     pub detail_follow: bool,
     /// The reader scrolled down since the last render, which may reach the tail.
     pub detail_down: bool,
+    /// Whether the detail panel shows the agent's activity or its transcript (`v`).
+    pub detail_view: DetailView,
     /// Ephemeral tool-call chips drawn as an overlay below agent cards.
     pub chips: ChipTray,
     /// Whether the help overlay is shown (`?` toggles, `esc` closes).
@@ -242,7 +268,8 @@ pub struct App {
     /// Ladder of folded-model snapshots, ascending by `folded`, used to start a
     /// backward seek near its target instead of re-folding from item zero.
     snapshots: Vec<Snapshot>,
-    /// Whether the detail panel shows long prompts whole (`x`).
+    /// Whether the detail panel unfolds what it folds (`x`): long prompts, long
+    /// reports, and in the activity view task updates and runs of tool calls.
     pub whole_prompts: bool,
     /// The command a message for an agent is sent with (`--on-send`): words
     /// split on whitespace, then `{text}` filled in with the message, and
@@ -344,6 +371,7 @@ impl App {
             detail_scroll: 0,
             detail_follow: true,
             detail_down: false,
+            detail_view: DetailView::default(),
             chips: ChipTray::default(),
             show_help: false,
             layout_dirty: false,
@@ -928,6 +956,7 @@ impl App {
             panel_share: self.panel_share,
             show_timeline: self.show_timeline,
             whole_prompts: self.whole_prompts,
+            transcript: self.detail_view == DetailView::Transcript,
             follow: self.camera == Camera::Follow,
             camera: (self.camera == Camera::Manual).then(|| {
                 let v = self.pending_camera.unwrap_or(self.flow.viewport);
@@ -943,6 +972,9 @@ impl App {
         self.panel_share = kept.panel_share;
         self.show_timeline = kept.show_timeline;
         self.whole_prompts = kept.whole_prompts;
+        if kept.transcript {
+            self.detail_view = DetailView::Transcript;
+        }
         self.camera = if kept.follow {
             Camera::Follow
         } else if kept.camera.is_some() {
@@ -1129,9 +1161,18 @@ impl App {
             self.detail_follow = false;
         }
         self.detail_down |= delta > 0;
-        self.detail_scroll =
-            (i32::from(self.detail_scroll) + delta).clamp(0, i32::from(u16::MAX)) as u16;
+        self.detail_scroll = self.detail_scroll.saturating_add_signed(delta as isize);
         true
+    }
+
+    /// Switch the detail panel between activity and transcript (`v`). The two
+    /// differ in length, so a place in one is none in the other: it reopens on
+    /// the newest line.
+    pub fn toggle_detail_view(&mut self) {
+        self.detail_view = self.detail_view.toggled();
+        self.detail_scroll = 0;
+        self.detail_follow = true;
+        self.detail_seen = None;
     }
 
     /// A press at a cell: on the panel's left edge (or the cell before it) it

@@ -373,6 +373,11 @@ fn handle_key(key: RKeyEvent, app: &mut App) {
             app.whole_prompts = !app.whole_prompts;
             return;
         }
+        // The panel's agent: what it did, or everything it said.
+        RKeyCode::Char('v') | RKeyCode::Char('V') if app.panel_agent().is_some() => {
+            app.toggle_detail_view();
+            return;
+        }
         RKeyCode::Char('t') | RKeyCode::Char('T') => {
             app.show_timeline = !app.show_timeline;
             return;
@@ -462,7 +467,7 @@ fn scroll_detail(app: &mut App, delta: i32) -> bool {
     if delta < 0 {
         app.detail_follow = false;
     }
-    app.detail_scroll = (app.detail_scroll as i32 + delta).max(0) as u16;
+    app.detail_scroll = app.detail_scroll.saturating_add_signed(delta as isize);
     true
 }
 

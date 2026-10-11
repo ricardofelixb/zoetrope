@@ -23,6 +23,8 @@ pub struct Kept {
     pub panel_share: u16,
     pub show_timeline: bool,
     pub whole_prompts: bool,
+    /// The detail panel shows the transcript rather than the activity.
+    pub transcript: bool,
     pub follow: bool,
     /// Where the user took the camera, as pan x, pan y and zoom: `None` unless
     /// they did.
@@ -36,6 +38,7 @@ impl Default for Kept {
             panel_share: 50,
             show_timeline: true,
             whole_prompts: false,
+            transcript: false,
             follow: false,
             camera: None,
         }

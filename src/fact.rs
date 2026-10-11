@@ -95,15 +95,22 @@ pub enum FactKind {
     Told(String),
     /// A tool call began. `summary` is the provider's one-line rendering of the
     /// input (a command, a path), because what makes a good summary is a
-    /// property of the tool vocabulary, which only the provider knows.
+    /// property of the tool vocabulary, which only the provider knows. `input`
+    /// is the whole input as the format wrote it, which the summary is a cut of.
     ToolStart {
         call: CallId,
         name: String,
         summary: Option<String>,
+        input: Option<String>,
     },
     /// A tool call ended with an observed outcome. Emitted only from a record
-    /// that carries the outcome; never synthesised from silence.
-    ToolEnd { call: CallId, outcome: Outcome },
+    /// that carries the outcome; never synthesised from silence. `output` is
+    /// the text the tool returned, whole, when the record carries it.
+    ToolEnd {
+        call: CallId,
+        outcome: Outcome,
+        output: Option<String>,
+    },
     /// This tool call spawns an agent. Lets the core record provenance for the
     /// child (which prompt era, which reasoning) before the child appears.
     /// `reason` is the text or thinking the agent wrote just above the call in

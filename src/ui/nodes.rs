@@ -55,7 +55,7 @@ pub struct AgentNode {
 use crate::ui::truncate;
 
 /// Compact human token count, e.g. `1.2k`, `34`, `2.0M`.
-fn fmt_tokens(n: u64) -> String {
+pub(crate) fn fmt_tokens(n: u64) -> String {
     if n < 1_000 {
         n.to_string()
     } else if n < 1_000_000 {

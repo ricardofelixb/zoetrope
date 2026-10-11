@@ -309,6 +309,18 @@ impl Default for Output {
 }
 
 impl Output {
+    /// The text of the output, its parts one after another.
+    pub fn text(&self) -> Option<String> {
+        match self {
+            Output::Text(s) => Some(s.clone()),
+            Output::Parts(parts) => {
+                let texts: Vec<&str> = parts.iter().filter_map(|p| p.text.as_deref()).collect();
+                (!texts.is_empty()).then(|| texts.join("\n"))
+            }
+            Output::Other(_) => None,
+        }
+    }
+
     /// The leading text, where the `exec` tool writes its verdict line.
     pub fn head(&self) -> Option<&str> {
         match self {
@@ -435,6 +447,8 @@ pub struct CommandExecution {
     /// `completed`, `failed`.
     pub status: Option<String>,
     pub exit_code: Option<i64>,
+    /// Everything the command printed.
+    pub aggregated_output: Option<String>,
 }
 
 impl CommandExecution {
@@ -475,6 +489,8 @@ pub struct FileChange {
     #[serde(default)]
     pub changes: serde_json::Map<String, serde_json::Value>,
     pub status: Option<String>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

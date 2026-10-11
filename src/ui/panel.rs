@@ -15,8 +15,9 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
 use chrono::{DateTime, Utc};
 
-use crate::state::App;
 use crate::state::session::AgentInfo;
+use crate::state::{App, DetailView};
+use crate::ui::nodes::fmt_tokens;
 use crate::ui::{talk, truncate};
 
 /// Render the detail panel for `agent_id` into `area`.
@@ -32,6 +33,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
         detail_follow,
         detail_down,
         detail_seen,
+        detail_view,
         whole_prompts,
         panel_drag,
         timeline,
@@ -81,6 +83,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     let talk_block = Block::default()
         .borders(Borders::TOP)
         .border_style(bg.fg(palette.muted))
+        .title_top(view_tabs(*detail_view, *whole_prompts, bg, &palette))
         .style(bg);
     let talk_inner = talk_block.inner(talk_area);
     let lines = talk::lines(
@@ -88,16 +91,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
         agent_id,
         talk_inner.width as usize,
         *whole_prompts,
+        *detail_view,
+        now,
         &palette,
     );
 
     // The conversation tails the newest line by default; scrolling up detaches
     // it. The renderer clamps the offset to the real maximum and writes it (and
     // the re-attach) back, so the indicator and the next keypress agree.
-    let total = lines.len().min(u16::MAX as usize) as u16;
+    let total = lines.len();
     let (scroll, follow) = resolve_scroll(
         total,
-        talk_inner.height,
+        talk_inner.height as usize,
         *detail_scroll,
         *detail_follow,
         std::mem::take(detail_down),
@@ -105,12 +110,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     *detail_scroll = scroll;
     *detail_follow = follow;
     // Scrolled up, what has been said since is counted, as a chat would.
-    let said = talk::said(session, agent_id);
+    let said = talk::said(session, agent_id, *detail_view);
     let seen = *detail_seen.get_or_insert(said);
     if follow {
         *detail_seen = None;
     }
-    if total > talk_inner.height {
+    if total > talk_inner.height as usize {
         let label = match said.saturating_sub(seen) {
             _ if follow => " ↕ wheel · j/k ".to_string(),
             0 => format!(" ↕ {scroll}/{total} "),
@@ -134,7 +139,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     } else {
         lines
             .into_iter()
-            .skip(scroll as usize)
+            .skip(scroll)
             .take(talk_inner.height as usize)
             .collect()
     };
@@ -170,9 +175,13 @@ fn render_header(
         agent.status_word(),
         bg.fg(crate::ui::status_color(agent.status, palette)),
     )];
-    for part in [agent.model.clone(), fmt_timing(agent, now)]
-        .into_iter()
-        .flatten()
+    for part in [
+        agent.model.clone(),
+        fmt_timing(agent, now),
+        fmt_counts(agent),
+    ]
+    .into_iter()
+    .flatten()
     {
         status.push(Span::styled(format!("  {part}"), bg.fg(palette.subtle)));
     }
@@ -190,13 +199,59 @@ fn render_header(
     frame.render_widget(Paragraph::new(lines).style(bg), area);
 }
 
+/// The panel's view, as tabs over the conversation: which one it is in, and the
+/// key for the other. Expanded, it says so.
+fn view_tabs(
+    view: DetailView,
+    whole: bool,
+    bg: Style,
+    palette: &rataflow::Palette,
+) -> Line<'static> {
+    let tab = |name: &'static str, on: bool| {
+        if on {
+            Span::styled(name, bg.fg(palette.accent).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(name, bg.fg(palette.subtle))
+        }
+    };
+    let mut tabs = vec![
+        Span::styled(" ", bg),
+        tab("Activity", view == DetailView::Activity),
+        Span::styled(" · ", bg.fg(palette.muted)),
+        tab("Full transcript", view == DetailView::Transcript),
+        Span::styled(" · v ", bg.fg(palette.subtle)),
+    ];
+    if whole {
+        tabs.push(Span::styled("· expanded ", bg.fg(palette.accent)));
+    }
+    Line::from(tabs)
+}
+
+/// What the agent has used so far, as its card says it: tool calls, then output
+/// tokens. Nothing before there is something to count.
+fn fmt_counts(agent: &AgentInfo) -> Option<String> {
+    let tools = agent.tool_calls().len();
+    let parts = [
+        (tools > 0).then(|| format!("⚒ {tools}")),
+        (agent.output_tokens > 0).then(|| format!("{} tok", fmt_tokens(agent.output_tokens))),
+    ];
+    let parts: Vec<String> = parts.into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 /// Resolve the panel's scroll offset for one render: clamp to the reachable
 /// maximum (keep the last screenful in view — no over-scroll into blank) and
 /// reconcile the tail. Following pins to the bottom; scrolling back down to the
 /// bottom (or content that fits) re-attaches, but only on a scroll `down`: content
 /// that shrinks under a detached reader leaves them detached. Returns
 /// `(offset, tailing)`.
-fn resolve_scroll(total: u16, height: u16, scroll: u16, follow: bool, down: bool) -> (u16, bool) {
+fn resolve_scroll(
+    total: usize,
+    height: usize,
+    scroll: usize,
+    follow: bool,
+    down: bool,
+) -> (usize, bool) {
     let max = total.saturating_sub(height);
     let offset = if follow { max } else { scroll.min(max) };
     (offset, follow || down && offset >= max)
@@ -246,6 +301,12 @@ mod tests {
         assert_eq!(resolve_scroll(20, 8, 99, false, true), (12, true));
         // Content that shrank under a detached reader leaves them detached.
         assert_eq!(resolve_scroll(20, 8, 31, false, false), (12, false));
+        // A feed longer than a u16 counts is still reachable to its last row.
+        assert_eq!(resolve_scroll(70_000, 10, 0, true, false), (69_990, true));
+        assert_eq!(
+            resolve_scroll(70_000, 10, 66_000, false, false),
+            (66_000, false)
+        );
     }
 
     use chrono::TimeZone;
@@ -286,6 +347,30 @@ mod tests {
             Some("⏱ 10s"),
             "a finished agent stops"
         );
+    }
+
+    #[test]
+    fn counts_are_the_cards_and_say_nothing_before_there_are_any() {
+        let mut a = agent_with_ts(None, None);
+        assert_eq!(fmt_counts(&a), None);
+        a.output_tokens = 1_500;
+        assert_eq!(fmt_counts(&a).as_deref(), Some("1.5k tok"));
+    }
+
+    #[test]
+    fn the_tabs_say_which_view_and_the_key_for_the_other() {
+        let text = |view, whole| -> String {
+            view_tabs(view, whole, Style::default(), &rataflow::Palette::DARK)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        assert_eq!(
+            text(DetailView::Activity, false),
+            " Activity · Full transcript · v "
+        );
+        assert!(text(DetailView::Transcript, true).ends_with("· v · expanded "));
     }
 
     #[test]

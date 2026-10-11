@@ -20,11 +20,11 @@ pub mod discovery;
 pub mod wire;
 
 use crate::fact::{AgentKind, AgentStatus, Fact, FactKind, Outcome, Statement};
-use crate::provider::summary::{short_path, truncate_summary};
+use crate::provider::summary::{full_input, short_path, truncate_summary};
 use crate::state::session::MAIN_ID;
 use wire::{
-    AgentToolInput, ContentBlock, Entry, SubagentMeta, TaskStatus, UserContent, UserContentBlock,
-    is_spawn_tool, parse_line, parse_task_notification,
+    AgentToolInput, ContentBlock, Entry, SubagentMeta, TaskStatus, ToolResultContent, UserContent,
+    UserContentBlock, is_spawn_tool, parse_line, parse_task_notification,
 };
 
 /// Which file a line came from. Claude spreads one session over a main
@@ -279,6 +279,7 @@ fn facts_after(source: &Source, entry: &Entry, carried: &mut Option<String>) -> 
                                 call: call.clone(),
                                 name: name.clone(),
                                 summary,
+                                input: full_input(&tu.input),
                             }));
                             if is_spawn_tool(&name) {
                                 out.push(about(FactKind::Spawn {
@@ -357,12 +358,18 @@ fn facts_after(source: &Source, entry: &Entry, carried: &mut Option<String>) -> 
                         } else {
                             Outcome::Ok
                         };
+                        let output = r
+                            .content
+                            .as_ref()
+                            .map(ToolResultContent::text)
+                            .filter(|text| !text.is_empty());
                         out.push(Fact {
                             agent: Some(owner.clone()),
                             ts,
                             kind: FactKind::ToolEnd {
                                 call: call.clone(),
                                 outcome,
+                                output,
                             },
                         });
                     }
@@ -654,6 +661,61 @@ mod tests {
         assert!(facts.iter().any(|f| matches!(
             &f.kind,
             FactKind::Spawn { reason: Some(r), .. } if r == "Check the API first."
+        )));
+    }
+
+    /// A call keeps its whole input and the whole of what came back, of which
+    /// the summary and the outcome are a cut.
+    #[test]
+    fn a_call_keeps_its_whole_input_and_output() {
+        let mut stream = Stream::new(Source::Main);
+        let command = format!("cargo test {}", "--quiet ".repeat(40));
+        let call = serde_json::json!({"type":"assistant","uuid":"a","timestamp":"2026-10-06T10:00:00.000Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"t1","name":"Bash","input":{"command":command,"description":"run the tests"}}]}});
+        let result = serde_json::json!({"type":"user","uuid":"u","timestamp":"2026-10-06T10:00:09.000Z","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","is_error":true,"content":[
+                {"type":"text","text":"thread 'main' panicked at src/lib.rs:3"},
+                {"type":"image","source":{}},
+                {"type":"text","text":"assertion `left == right` failed"}]}]}});
+        let start = stream.push(&call.to_string()).unwrap().facts;
+        let Some(FactKind::ToolStart { summary, input, .. }) = start
+            .iter()
+            .map(|f| &f.kind)
+            .find(|k| matches!(k, FactKind::ToolStart { .. }))
+        else {
+            panic!("no tool start in {start:?}");
+        };
+        assert_eq!(
+            input.as_deref(),
+            Some(format!("command: {command}\ndescription: run the tests").as_str())
+        );
+        assert!(summary.as_deref().unwrap().ends_with('…'), "{summary:?}");
+        let end = stream.push(&result.to_string()).unwrap().facts;
+        let ended = end.iter().find_map(|f| match &f.kind {
+            FactKind::ToolEnd {
+                outcome: Outcome::Err,
+                output,
+                ..
+            } => Some(output.as_deref()),
+            _ => None,
+        });
+        assert_eq!(
+            ended,
+            Some(Some(
+                "thread 'main' panicked at src/lib.rs:3\nassertion `left == right` failed"
+            ))
+        );
+    }
+
+    /// A result that is a bare string is the output as it is.
+    #[test]
+    fn a_string_result_is_the_output() {
+        let mut stream = Stream::new(Source::Main);
+        let line = r#"{"type":"user","uuid":"u","timestamp":"2026-10-06T10:00:09.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok\n  indented"}]}}"#;
+        let facts = stream.push(line).unwrap().facts;
+        assert!(facts.iter().any(|f| matches!(
+            &f.kind,
+            FactKind::ToolEnd { output: Some(o), .. } if o == "ok\n  indented"
         )));
     }
 }

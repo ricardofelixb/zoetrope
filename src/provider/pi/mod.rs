@@ -12,7 +12,7 @@ pub mod discovery;
 pub mod wire;
 
 use crate::fact::{AgentKind, Fact, FactKind, Outcome, Statement};
-use crate::provider::summary::{short_path, truncate_summary};
+use crate::provider::summary::{full_input, short_path, truncate_summary};
 use crate::state::session::MAIN_ID;
 use wire::{Block, Line, parse_line};
 
@@ -104,6 +104,7 @@ impl Stream {
                                             call: id.clone(),
                                             name: name.clone(),
                                             summary: summarize(arguments, self.cwd.as_deref()),
+                                            input: full_input(arguments),
                                         }));
                                     }
                                     _ => {}
@@ -117,6 +118,7 @@ impl Stream {
                         }
                     }
                     "toolResult" => out.extend(m.tool_call_id.clone().map(|call| {
+                        let output = Some(m.content.text()).filter(|text| !text.is_empty());
                         by(FactKind::ToolEnd {
                             call,
                             outcome: if m.is_error {
@@ -124,6 +126,7 @@ impl Stream {
                             } else {
                                 Outcome::Ok
                             },
+                            output,
                         })
                     })),
                     _ => {}
@@ -171,5 +174,23 @@ mod tests {
             ]
         };
         crate::provider::harness::conform("pi", "demo", streams);
+    }
+
+    /// A call keeps its whole arguments and the text of its result.
+    #[test]
+    fn a_call_keeps_its_whole_input_and_output() {
+        let mut stream = Stream::new();
+        let call = r#"{"type":"message","timestamp":"2026-10-08T22:49:00.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"cargo test\ncargo clippy"}}]}}"#;
+        let result = r#"{"type":"message","timestamp":"2026-10-08T22:49:09.000Z","message":{"role":"toolResult","toolCallId":"c1","isError":true,"content":[{"type":"text","text":"error[E0308]: mismatched types"}]}}"#;
+        let start = stream.push(call).unwrap().facts;
+        assert!(start.iter().any(|f| matches!(
+            &f.kind,
+            FactKind::ToolStart { input: Some(i), .. } if i == "command: cargo test\ncargo clippy"
+        )));
+        let end = stream.push(result).unwrap().facts;
+        assert!(end.iter().any(|f| matches!(
+            &f.kind,
+            FactKind::ToolEnd { output: Some(o), .. } if o == "error[E0308]: mismatched types"
+        )));
     }
 }

@@ -408,6 +408,21 @@ pub enum ToolResultContent {
     Blocks(Vec<serde_json::Value>),
 }
 
+impl ToolResultContent {
+    /// The result's text: the string, or the text blocks one to a line. Other
+    /// blocks (an image) have none.
+    pub fn text(&self) -> String {
+        match self {
+            ToolResultContent::Text(s) => s.clone(),
+            ToolResultContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| b.get("text")?.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // System / attachment / flat metadata / ledger
 // ---------------------------------------------------------------------------

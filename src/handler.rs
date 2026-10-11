@@ -245,6 +245,12 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> bool {
             return false;
         }
 
+        // The panel's agent: what it did, or everything it said.
+        KeyCode::Char('v') | KeyCode::Char('V') if app.panel_agent().is_some() => {
+            app.toggle_detail_view();
+            return false;
+        }
+
         KeyCode::Char('t') | KeyCode::Char('T') => {
             app.show_timeline = !app.show_timeline;
             return false;
@@ -382,7 +388,7 @@ fn scroll_detail(app: &mut App, delta: i32) -> bool {
         app.detail_follow = false;
     }
     app.detail_down |= delta > 0;
-    app.detail_scroll = (app.detail_scroll as i32 + delta).max(0) as u16;
+    app.detail_scroll = app.detail_scroll.saturating_add_signed(delta as isize);
     true
 }
 
@@ -787,6 +793,10 @@ mod tests {
         assert!(!app.wheel_panel(5, 5, 3), "outside it");
         assert!(app.wheel_panel(12, 5, -3));
         assert!(!app.detail_follow, "up stops following");
+        // A feed of more than a u16's rows scrolls on past them.
+        app.detail_scroll = 70_000;
+        assert!(app.wheel_panel(12, 5, 3));
+        assert_eq!(app.detail_scroll, 70_003);
     }
 
     #[test]
@@ -859,5 +869,41 @@ mod tests {
         assert!(app.panel_agent().is_some(), "otherwise the root has one");
         press(&mut app, KeyCode::Char('t'));
         assert!(!app.show_timeline, "t hides the timeline");
+    }
+
+    /// `v` switches the open panel between activity and the transcript, and
+    /// reopens it on its newest line; with no panel it is no key at all.
+    #[test]
+    fn v_switches_the_panels_view() {
+        use crate::state::DetailView;
+        let mut app = App::new("s".into(), Mode::Live);
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.detail_view, DetailView::Activity, "nothing is open");
+
+        let node = rataflow::Node::new(
+            crate::state::session::MAIN_ID,
+            (0.0, 0.0),
+            (10.0, 5.0),
+            crate::ui::nodes::AgentNode {
+                title: "root".into(),
+                description: None,
+                said: None,
+                status: crate::state::session::AgentStatus::Running,
+                tool_count: 0,
+                last_tool: None,
+                output_tokens: 0,
+                interactive: false,
+            },
+        );
+        app.flow.add_node(node).unwrap();
+        app.flow.select_node(crate::state::session::MAIN_ID);
+        assert!(app.panel_agent().is_some());
+        app.detail_scroll = 7;
+        app.detail_follow = false;
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.detail_view, DetailView::Transcript);
+        assert!(app.detail_follow && app.detail_scroll == 0);
+        press(&mut app, KeyCode::Char('V'));
+        assert_eq!(app.detail_view, DetailView::Activity);
     }
 }
