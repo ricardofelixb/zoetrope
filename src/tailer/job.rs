@@ -690,6 +690,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A line naming a session that is in the tree already changes nothing,
+    /// the parent it names included: it cannot be used to forget a hanging
+    /// that a later line would then close into a loop.
+    #[test]
+    fn a_repeated_line_does_not_make_room_for_a_loop() {
+        let dir = temp_dir("repeat");
+        let manifest = dir.join("repeat.jsonl");
+        append(&manifest, r#"{"zoe":"job","v":1,"id":"j"}"#);
+        let (a, b) = (
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        for session in [a, b] {
+            append(
+                &dir.join(format!("{session}.jsonl")),
+                &claude_line(session, 1),
+            );
+        }
+        for line in [
+            format!(r#"{{"member":"a","parent":"b","path":"{a}.jsonl"}}"#),
+            format!(r#"{{"member":"a","path":"{a}.jsonl"}}"#),
+            format!(r#"{{"member":"b","parent":"a","path":"{b}.jsonl"}}"#),
+        ] {
+            append(&manifest, &line);
+        }
+        let model = fold(&read_job(&manifest));
+        let parent = |id: &str| model.agent(id).unwrap().parent.clone();
+        assert_eq!(parent("a").as_deref(), Some("b"), "the first line stands");
+        assert_eq!(parent("b").as_deref(), Some(MAIN_ID), "closes the loop");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A line stating a member shows its key at once, whether or not the
     /// session it names can be opened yet.
     #[test]

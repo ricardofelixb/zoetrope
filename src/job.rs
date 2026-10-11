@@ -1056,7 +1056,7 @@ mod tests {
         let old = group_line(
             r#"{"group":"c","cwd":"/old","branch":"dev","title":"old","ts":"2026-10-06T10:01:00Z"}"#,
         );
-        // Fields a later line leaves out are not known to have gone.
+        // A field a later line leaves out is gone: a conductor can lose its branch.
         let new =
             group_line(r#"{"group":"c","cwd":"/new","title":"new","ts":"2026-10-06T10:02:00Z"}"#);
         for order in [[&old, &new], [&new, &old]] {
@@ -1064,7 +1064,7 @@ mod tests {
             let model = fold(&facts);
             let group = model.agent("c").unwrap();
             assert_eq!(group.cwd.as_deref(), Some("/new"));
-            assert_eq!(group.branch.as_deref(), Some("dev"));
+            assert_eq!(group.branch, None);
             assert_eq!(group.description.as_deref(), Some("new"));
             assert_eq!(
                 group.agent_type.as_deref(),
