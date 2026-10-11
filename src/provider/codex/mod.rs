@@ -730,4 +730,59 @@ mod tests {
             "apply_patch: app.js, theme.js"
         );
     }
+
+    /// Every kind of call keeps its whole input and the text of its result.
+    #[test]
+    fn calls_keep_their_whole_input_and_output() {
+        let mut s = Stream::new();
+        s.push(r#"{"ordinal":0,"type":"session_meta","payload":{"id":"a","session_id":"a","source":"cli","thread_source":"user"}}"#);
+        let facts = |s: &mut Stream, line: &str| s.push(line).unwrap().facts;
+        // The `exec` program, and the parts its output came back in.
+        let start = facts(
+            &mut s,
+            r#"{"timestamp":"2026-08-26T16:10:54.748Z","ordinal":1,"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_1","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"cargo test\"});\nr;"}}"#,
+        );
+        assert!(matches!(
+            &start[0].kind,
+            FactKind::ToolStart { input: Some(i), .. } if i == "const r = await tools.exec_command({\"cmd\":\"cargo test\"});\nr;"
+        ));
+        let end = facts(
+            &mut s,
+            r#"{"timestamp":"2026-08-26T16:10:54.947Z","ordinal":2,"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_1","output":[{"type":"input_text","text":"Script completed\n"},{"type":"input_text","text":"Output:\nok"}]}}"#,
+        );
+        assert!(matches!(
+            &end[0].kind,
+            FactKind::ToolEnd { output: Some(o), .. } if o == "Script completed\n\nOutput:\nok"
+        ));
+        // A command that ran, whole, and everything it printed.
+        let ran = facts(
+            &mut s,
+            r#"{"timestamp":"2026-08-26T16:10:55.934Z","ordinal":3,"type":"event_msg","payload":{"type":"item_completed","thread_id":"a","item":{"type":"CommandExecution","id":"exec-1","command":["/bin/zsh","-lc","cargo test -- --nocapture"],"parsed_cmd":[],"status":"failed","exit_code":101,"aggregated_output":"error[E0308]: mismatched types\n  --> src/lib.rs:3"},"started_at_ms":1787760650000,"completed_at_ms":1787760654000}}"#,
+        );
+        assert!(matches!(
+            &ran[0].kind,
+            FactKind::ToolStart { input: Some(i), .. } if i == "cargo test -- --nocapture"
+        ));
+        assert!(matches!(
+            &ran[1].kind,
+            FactKind::ToolEnd { output: Some(o), .. } if o == "error[E0308]: mismatched types\n  --> src/lib.rs:3"
+        ));
+        // A built-in tool: its arguments by key, and its output as written.
+        let call = facts(
+            &mut s,
+            r#"{"timestamp":"2026-08-26T16:13:35.485Z","ordinal":4,"type":"response_item","payload":{"type":"function_call","name":"send_message","arguments":"{\"to\":\"worker\",\"text\":\"go\"}","call_id":"call_m"}}"#,
+        );
+        assert!(matches!(
+            &call[0].kind,
+            FactKind::ToolStart { input: Some(i), .. } if i == "text: go\nto: worker"
+        ));
+        let out = facts(
+            &mut s,
+            r#"{"timestamp":"2026-08-26T16:13:58.376Z","ordinal":5,"type":"response_item","payload":{"type":"function_call_output","call_id":"call_m","output":"sent"}}"#,
+        );
+        assert!(matches!(
+            &out[0].kind,
+            FactKind::ToolEnd { output: Some(o), .. } if o == "sent"
+        ));
+    }
 }

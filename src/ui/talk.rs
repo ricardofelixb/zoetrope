@@ -1368,4 +1368,92 @@ mod tests {
         assert!(shown.contains("Review this change."), "{shown}");
         assert!(shown.contains("you → review"), "{shown}");
     }
+
+    /// A model whose one call failed: a command too long for a row, and a
+    /// diagnostic that is indented and several lines.
+    fn failed_test() -> (SessionModel, String) {
+        let mut model = SessionModel::new("s".into());
+        let command = format!("cargo test {}", "--quiet ".repeat(30));
+        let start = FactKind::ToolStart {
+            call: "t".into(),
+            name: "Bash".into(),
+            summary: Some("cargo test".into()),
+            input: Some(format!("command: {command}")),
+        };
+        apply(&mut model, MAIN_ID, 1, start);
+        let output = "thread 'main' panicked at src/lib.rs:3\n    assertion failed: left == right\n\u{1b}[31m  left: 1\u{1b}[0m\tright: 2";
+        let end = FactKind::ToolEnd {
+            call: "t".into(),
+            outcome: Outcome::Err,
+            output: Some(output.into()),
+        };
+        apply(&mut model, MAIN_ID, 2, end);
+        (model, command)
+    }
+
+    /// The whole of what a call was given and what came back is there on `x`,
+    /// in either view, wrapped and not cut; without it the failure is the row.
+    #[test]
+    fn x_shows_a_calls_whole_input_and_output() {
+        let (model, command) = failed_test();
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        for view in [DetailView::Activity, DetailView::Transcript] {
+            let folded = show(&model, MAIN_ID, false, view, None);
+            assert!(folded.contains("\u{2717} run cargo test"), "{folded}");
+            assert!(!folded.contains("panicked"), "{view:?}: {folded}");
+            let whole = show(&model, MAIN_ID, true, view, None);
+            assert!(whole.contains("\u{2717} run cargo test"), "{whole}");
+            assert!(
+                squash(&whole).contains(&squash(&command)),
+                "{view:?}: {whole}"
+            );
+            assert!(
+                whole.contains("thread 'main' panicked at src/lib.rs:3"),
+                "{whole}"
+            );
+            // Its indentation is kept; the escape codes are not drawn.
+            let indent = |needle: &str| {
+                let line = whole.lines().find(|l| l.contains(needle)).unwrap();
+                line.len() - line.trim_start().len()
+            };
+            assert_eq!(
+                indent("assertion failed"),
+                indent("thread 'main'") + 4,
+                "{whole}"
+            );
+            assert!(!whole.contains('\u{1b}'), "{whole}");
+            assert!(whole.contains("left: 1"), "{whole}");
+        }
+    }
+
+    /// Each call of an unfolded group has its own, under its own row.
+    #[test]
+    fn x_shows_each_call_of_a_group_its_own_output() {
+        let mut model = SessionModel::new("s".into());
+        for (minute, name, out) in [(1, "a.rs", "alpha text"), (2, "b.rs", "beta text")] {
+            let call = format!("c{minute}");
+            let start = FactKind::ToolStart {
+                call: call.clone(),
+                name: "Read".into(),
+                summary: Some(name.into()),
+                input: None,
+            };
+            apply(&mut model, MAIN_ID, minute, start);
+            let end = FactKind::ToolEnd {
+                call,
+                outcome: Outcome::Ok,
+                output: Some(out.into()),
+            };
+            apply(&mut model, MAIN_ID, minute, end);
+        }
+        let folded = show(&model, MAIN_ID, false, DetailView::Activity, None);
+        assert!(
+            folded.contains("2 tools") && !folded.contains("alpha"),
+            "{folded}"
+        );
+        let whole = show(&model, MAIN_ID, true, DetailView::Activity, None);
+        let (a, b) = (whole.find("read a.rs"), whole.find("read b.rs"));
+        let (alpha, beta) = (whole.find("alpha text"), whole.find("beta text"));
+        assert!(a < alpha && alpha < b && b < beta, "{whole}");
+    }
 }
