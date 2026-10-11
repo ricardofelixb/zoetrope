@@ -12,12 +12,18 @@ use ratatui::text::{Line, Span};
 
 use crate::state::DetailView;
 use crate::state::session::{
-    AgentKind, AgentStatus, Entry, EntryKind, MAIN_ID, SessionModel, ToolState,
+    AgentKind, AgentStatus, Entry, EntryKind, MAIN_ID, SessionModel, ToolCallInfo, ToolState,
 };
 use crate::ui::{truncate, wrap};
 
 /// Wrapped lines of a prompt shown before it folds; `x` shows prompts whole.
 const PROMPT_LINES: usize = 3;
+/// A report of more wrapped lines than this is previewed in the activity view:
+/// its first `REPORT_HEAD` lines and its last `REPORT_TAIL`, where its outcome,
+/// or a question for the reader, ends up. Shorter ones are whole.
+const REPORT_LINES: usize = 8;
+const REPORT_HEAD: usize = 4;
+const REPORT_TAIL: usize = 2;
 /// The time column, `HH:MM` and two spaces, which bodies are indented past.
 const TIME_COLS: usize = 7;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -30,18 +36,20 @@ fn name(model: &SessionModel, id: &str) -> String {
         .unwrap_or_else(|| id.to_string())
 }
 
-/// One thing the conversation shows: an entry, or an agent starting (one
-/// spawned by another, which has no prompt of its own in the format).
+/// One thing the conversation shows: an entry, an agent starting (one spawned
+/// by another, which has no prompt of its own in the format), or, in the
+/// activity view, an agent's tool calls: one call, or a run of successful ones.
 enum Item<'a> {
     Entry(&'a Entry),
     Started(&'a str, Option<DateTime<Utc>>),
+    Calls(&'a str, Vec<&'a ToolCallInfo>),
 }
 
 impl Item<'_> {
     fn agent(&self) -> &str {
         match self {
             Item::Entry(e) => &e.agent,
-            Item::Started(id, _) => id,
+            Item::Started(id, _) | Item::Calls(id, _) => id,
         }
     }
 
@@ -49,8 +57,36 @@ impl Item<'_> {
         match self {
             Item::Entry(e) => e.ts,
             Item::Started(_, ts) => *ts,
+            Item::Calls(_, calls) => calls.first().and_then(|c| c.ts),
         }
     }
+}
+
+/// How much of an item's text shows before the rest folds, until `x`.
+enum Fold {
+    /// All of it.
+    None,
+    /// Its first `PROMPT_LINES`.
+    Head,
+    /// A long brief is one line, under this title; a short one is `Head`.
+    Task(String),
+    /// A long report is its head and its tail.
+    Report,
+}
+
+/// What a line of text is.
+enum Row {
+    Text,
+    Code,
+    /// Where lines were folded away.
+    Fold,
+}
+
+/// How a row of tool calls reads: failures and running calls stand out.
+enum Tone {
+    Quiet,
+    Failed,
+    Running,
 }
 
 /// Every line of `scope`'s conversation, wrapped to `width`; `whole` shows long
@@ -64,7 +100,7 @@ pub(crate) fn lines(
     now: Option<DateTime<Utc>>,
     palette: &rataflow::Palette,
 ) -> Vec<Line<'static>> {
-    let _ = (view, now);
+    let activity = view == DetailView::Activity;
     let job = crate::job::is_job_id(&model.session_id);
     let base =
         depth(model, scope) + usize::from(job && scope == MAIN_ID || conductor(model, scope));
@@ -73,7 +109,9 @@ pub(crate) fn lines(
     let mut out = Vec::new();
     // The minute shown last: a time is shown only when it changes.
     let mut minute = String::new();
-    for item in items(model, scope) {
+    // Whether the last thing shown was tool calls, which sit close together.
+    let mut calls_before = false;
+    for item in items(model, scope, view) {
         let id = item.agent();
         let depth = depth(model, id).saturating_sub(base);
         let indent = TIME_COLS + 2 * depth;
@@ -103,25 +141,41 @@ pub(crate) fn lines(
             }
         };
         let accent = Style::default().fg(palette.accent);
-        let (header, head_style, body, body_style, fold) = match item {
+        let pad = " ".repeat(2 * depth);
+        let margin = " ".repeat(indent);
+        // A brief gives way to one line in the activity view; a person's own
+        // words, and the transcript, fold at their first lines.
+        let brief = |title: String| {
+            if activity {
+                Fold::Task(title)
+            } else {
+                Fold::Head
+            }
+        };
+        let (header, head_style, body, body_style, fold) = match &item {
             Item::Entry(e) => match e.kind {
                 EntryKind::Prompt if job && id == MAIN_ID => (
                     Some("task".to_string()),
                     subtle,
                     e.text.as_str(),
                     subtle,
-                    true,
+                    brief("Task updated".to_string()),
                 ),
                 EntryKind::Prompt => {
                     let from = to(if job { "conductor" } else { "you" });
-                    (Some(from), subtle, e.text.as_str(), subtle, true)
+                    let fold = if job || id != MAIN_ID {
+                        brief(format!("Task updated · {from}"))
+                    } else {
+                        Fold::Head
+                    };
+                    (Some(from), subtle, e.text.as_str(), subtle, fold)
                 }
                 EntryKind::Told => (
                     Some(to("you")),
                     accent.add_modifier(Modifier::BOLD),
                     e.text.as_str(),
                     accent,
-                    false,
+                    Fold::None,
                 ),
                 EntryKind::Waiting => continue,
                 EntryKind::Thought => (
@@ -129,7 +183,7 @@ pub(crate) fn lines(
                     subtle,
                     e.text.as_str(),
                     subtle.add_modifier(Modifier::ITALIC),
-                    false,
+                    Fold::None,
                 ),
                 EntryKind::Message => (
                     (!own).then(|| who.clone()),
@@ -138,7 +192,7 @@ pub(crate) fn lines(
                         .add_modifier(Modifier::BOLD),
                     e.text.as_str(),
                     Style::default().fg(palette.text),
-                    false,
+                    if activity { Fold::Report } else { Fold::None },
                 ),
             },
             Item::Started(..) => {
@@ -149,14 +203,92 @@ pub(crate) fn lines(
                     }
                     _ => format!("{who} started"),
                 };
-                (Some(head), subtle, "", subtle, false)
+                (Some(head), subtle, "", subtle, Fold::None)
+            }
+            // Tool calls are rows of their own, close together.
+            Item::Calls(_, calls) => {
+                if !out.is_empty() && !calls_before {
+                    out.push(Line::default());
+                }
+                calls_before = true;
+                let rows = call_rows(model, id, (!own).then_some(who.as_str()), calls, whole, now);
+                let mut time = Some(time);
+                for (row, kind) in rows {
+                    let lead = match time.take() {
+                        Some(time) => format!("{time}{pad}"),
+                        None => margin.clone(),
+                    };
+                    let style = match kind {
+                        Tone::Quiet => subtle,
+                        Tone::Failed => Style::default()
+                            .fg(palette.error)
+                            .add_modifier(Modifier::BOLD),
+                        Tone::Running => accent,
+                    };
+                    out.push(Line::from(vec![
+                        Span::styled(lead, subtle),
+                        Span::styled(truncate(&row, text_w), style),
+                    ]));
+                }
+                continue;
             }
         };
         if !out.is_empty() {
             out.push(Line::default());
         }
-        let pad = " ".repeat(2 * depth);
+        calls_before = false;
         let mut time = Some(time);
+
+        // Each line, and whether it is in a code block: those keep their
+        // indentation and lose their fences.
+        let mut rows: Vec<(String, Row)> = Vec::new();
+        let mut fenced = false;
+        for para in plain(body).lines() {
+            if para.trim_start().starts_with("```") {
+                fenced = !fenced;
+            } else if fenced {
+                rows.push((truncate(para, text_w), Row::Code));
+            } else if para.trim().is_empty() {
+                rows.push((String::new(), Row::Text));
+            } else {
+                rows.extend(
+                    wrap(para, text_w, usize::MAX)
+                        .into_iter()
+                        .map(|l| (l, Row::Text)),
+                );
+            }
+        }
+        while rows.last().is_some_and(|(l, _)| l.is_empty()) {
+            rows.pop();
+        }
+        let mut header = header;
+        let total = rows.len();
+        // How much of it shows before the rest folds: the lines kept from its
+        // start and from its end.
+        let (head, tail) = match fold {
+            _ if whole => (total, 0),
+            Fold::None => (total, 0),
+            Fold::Head => (PROMPT_LINES, 0),
+            Fold::Task(title) if total > PROMPT_LINES => {
+                header = Some(format!("{title} · {total} lines · x"));
+                rows.clear();
+                (0, 0)
+            }
+            Fold::Task(_) => (PROMPT_LINES, 0),
+            Fold::Report if total > REPORT_LINES => (REPORT_HEAD, REPORT_TAIL),
+            Fold::Report => (total, 0),
+        };
+        let hidden = rows.len().saturating_sub(head + tail);
+        if hidden > 0 {
+            let mut after = rows.split_off(rows.len() - tail);
+            rows.truncate(head);
+            while rows.last().is_some_and(|(l, _)| l.is_empty()) {
+                rows.pop();
+            }
+            rows.push((format!("… {hidden} more lines · x"), Row::Fold));
+            let blank = after.iter().take_while(|(l, _)| l.is_empty()).count();
+            rows.extend(after.drain(blank..));
+        }
         if let Some(header) = header {
             out.push(Line::from(vec![
                 Span::styled(time.take().unwrap_or_default(), subtle),
@@ -164,58 +296,19 @@ pub(crate) fn lines(
                 Span::styled(truncate(&header, width.saturating_sub(indent)), head_style),
             ]));
         }
-
-        // Each line, and whether it is in a code block: those keep their
-        // indentation and lose their fences.
-        let mut wrapped: Vec<(String, bool)> = Vec::new();
-        let mut fenced = false;
-        for para in plain(body).lines() {
-            if para.trim_start().starts_with("```") {
-                fenced = !fenced;
-            } else if fenced {
-                wrapped.push((truncate(para, text_w), true));
-            } else if para.trim().is_empty() {
-                wrapped.push((String::new(), false));
-            } else {
-                wrapped.extend(
-                    wrap(para, text_w, usize::MAX)
-                        .into_iter()
-                        .map(|l| (l, false)),
-                );
-            }
-        }
-        while wrapped.last().is_some_and(|(l, _)| l.is_empty()) {
-            wrapped.pop();
-        }
-        let hidden = if fold && !whole {
-            wrapped.len().saturating_sub(PROMPT_LINES)
-        } else {
-            0
-        };
-        wrapped.truncate(wrapped.len() - hidden);
-        while hidden > 0 && wrapped.last().is_some_and(|(l, _)| l.is_empty()) {
-            wrapped.pop();
-        }
-        let margin = " ".repeat(indent);
-        for (text, fenced) in wrapped {
+        for (text, row) in rows {
             // Unheaded, the first line carries the time.
             let lead = match time.take() {
                 Some(time) => Span::styled(format!("{time}{pad}"), subtle),
                 None => Span::raw(margin.clone()),
             };
             let mut line = vec![lead];
-            if fenced {
-                line.push(Span::styled(text, code));
-            } else {
-                line.extend(inline_code(&text, body_style, code));
+            match row {
+                Row::Code => line.push(Span::styled(text, code)),
+                Row::Fold => line.push(Span::styled(text, subtle)),
+                Row::Text => line.extend(inline_code(&text, body_style, code)),
             }
             out.push(Line::from(line));
-        }
-        if hidden > 0 {
-            out.push(Line::from(vec![
-                Span::raw(margin.clone()),
-                Span::styled(format!("… {hidden} more lines · x"), subtle),
-            ]));
         }
     }
     out
@@ -236,8 +329,7 @@ fn inline_code(text: &str, style: Style, code: Style) -> Vec<Span<'static>> {
 
 /// How many things `scope`'s conversation shows, to count the new ones.
 pub(crate) fn said(model: &SessionModel, scope: &str, view: DetailView) -> usize {
-    let _ = view;
-    items(model, scope)
+    items(model, scope, view)
         .iter()
         .filter(|i| !matches!(i, Item::Entry(e) if e.kind == EntryKind::Thought))
         .count()
@@ -317,14 +409,21 @@ fn log<'a>(model: &'a SessionModel, scope: &str) -> Vec<Item<'a>> {
 /// What the conversation shows, in time order. A job's root repeats each
 /// member's prompts as its own chapters, and a message told while an agent ran
 /// is in its session as a prompt that starts with it: neither is shown twice.
-fn items<'a>(model: &'a SessionModel, scope: &str) -> Vec<Item<'a>> {
+/// The activity view leaves out thinking and adds the tool calls, runs of
+/// successful ones as one item.
+fn items<'a>(model: &'a SessionModel, scope: &str, view: DetailView) -> Vec<Item<'a>> {
     if conductor(model, scope) {
         return log(model, scope);
     }
+    let activity = view == DetailView::Activity;
     let job = crate::job::is_job_id(&model.session_id);
     let feed: Vec<&Entry> = model
         .feed()
-        .filter(|e| e.kind != EntryKind::Waiting && within(model, &e.agent, scope))
+        .filter(|e| {
+            e.kind != EntryKind::Waiting
+                && !(activity && e.kind == EntryKind::Thought)
+                && within(model, &e.agent, scope)
+        })
         .collect();
     let member_prompts: HashSet<(Option<DateTime<Utc>>, &str)> = feed
         .iter()
@@ -364,9 +463,34 @@ fn items<'a>(model: &'a SessionModel, scope: &str) -> Vec<Item<'a>> {
         {
             items.push(Item::Started(id, agent.first_ts));
         }
+        if activity && within(model, id, scope) {
+            items.extend(agent.tool_calls().map(|call| Item::Calls(id, vec![call])));
+        }
     }
     items.sort_by_key(Item::ts);
+    if activity {
+        items = grouped(items);
+    }
     items
+}
+
+/// `items` with each run of one agent's successful tool calls made one item.
+/// Anything else between two calls, another agent's included, splits the run.
+fn grouped(items: Vec<Item<'_>>) -> Vec<Item<'_>> {
+    let mut out: Vec<Item> = Vec::with_capacity(items.len());
+    for item in items {
+        if let Item::Calls(id, calls) = &item
+            && calls[0].state == ToolState::Ok
+            && let Some(Item::Calls(last, run)) = out.last_mut()
+            && last == id
+            && run[0].state == ToolState::Ok
+        {
+            run.extend(calls.iter().copied());
+        } else {
+            out.push(item);
+        }
+    }
+    out
 }
 
 /// How far below the root an agent hangs.
@@ -464,6 +588,80 @@ pub(crate) fn tools(
         ));
     }
     Some(Line::from(spans))
+}
+
+/// The rows a run of `id`'s tool calls shows, each with how it reads, `by` the
+/// agent's name when it is not the panel's own. One call is a row of its own;
+/// successful ones, several, are a count of what they did, unfolded by `whole`
+/// into a row each. Only what the model recorded is said: a call in an agent
+/// that is no longer running has no result, which is not a failure or a success.
+fn call_rows(
+    model: &SessionModel,
+    id: &str,
+    by: Option<&str>,
+    calls: &[&ToolCallInfo],
+    whole: bool,
+    now: Option<DateTime<Utc>>,
+) -> Vec<(String, Tone)> {
+    let running = model
+        .agent(id)
+        .is_some_and(|a| a.status == AgentStatus::Running);
+    let row = |call: &ToolCallInfo, by: &str| {
+        let what = describe(&call.name, call.summary.as_deref());
+        let took = call
+            .duration(now)
+            .filter(|d| d.num_seconds() >= 1)
+            .map(|d| format!(" · {}", crate::ui::chips::fmt_dur(d)))
+            .unwrap_or_default();
+        match call.state {
+            ToolState::Ok => (
+                format!("{} {by}{what}{took}", AgentStatus::Done.glyph()),
+                Tone::Quiet,
+            ),
+            ToolState::Err => (
+                format!("{} {by}{what}{took}", AgentStatus::Failed.glyph()),
+                Tone::Failed,
+            ),
+            ToolState::Pending if running => (
+                format!("{} {by}{what}{took}", AgentStatus::Running.glyph()),
+                Tone::Running,
+            ),
+            ToolState::Pending => (
+                format!("{} {by}{what} · no result", AgentStatus::Idle.glyph()),
+                Tone::Quiet,
+            ),
+        }
+    };
+    let by = by.map(|by| format!("{by} · ")).unwrap_or_default();
+    if calls.len() < 2 {
+        return calls.iter().map(|call| row(call, &by)).collect();
+    }
+    // Tools by what they did, in the order they first did it.
+    let mut tally: Vec<(String, usize)> = Vec::new();
+    for call in calls {
+        let what = describe(&call.name, call.summary.as_deref());
+        let did = what.split(' ').next().unwrap_or_default().to_string();
+        match tally.iter_mut().find(|(d, _)| *d == did) {
+            Some((_, n)) => *n += 1,
+            None => tally.push((did, 1)),
+        }
+    }
+    let tally: Vec<String> = tally.iter().map(|(d, n)| format!("{d} ×{n}")).collect();
+    let fold = if whole { "" } else { " · x" };
+    let head = format!(
+        "{} {by}{} tools · {}{fold}",
+        AgentStatus::Done.glyph(),
+        calls.len(),
+        tally.join(" · "),
+    );
+    let mut rows = vec![(head, Tone::Quiet)];
+    if whole {
+        rows.extend(calls.iter().map(|call| {
+            let (text, tone) = row(call, "");
+            (format!("  {text}"), tone)
+        }));
+    }
+    rows
 }
 
 /// A call as a verb and its object: `run cargo test`, `edit feed.rs`.
