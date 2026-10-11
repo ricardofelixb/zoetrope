@@ -14,7 +14,7 @@ use crate::state::DetailView;
 use crate::state::session::{
     AgentKind, AgentStatus, Entry, EntryKind, MAIN_ID, SessionModel, ToolCallInfo, ToolState,
 };
-use crate::ui::{truncate, wrap};
+use crate::ui::{split_at_width, truncate, wrap};
 
 /// Wrapped lines of a prompt shown before it folds; `x` shows prompts whole.
 const PROMPT_LINES: usize = 3;
@@ -211,7 +211,8 @@ pub(crate) fn lines(
                     out.push(Line::default());
                 }
                 calls_before = true;
-                let rows = call_rows(model, id, (!own).then_some(who.as_str()), calls, whole, now);
+                let by = (!own).then_some(who.as_str());
+                let rows = call_rows(model, id, by, calls, whole, text_w, now);
                 let mut time = Some(time);
                 for (row, kind) in rows {
                     let lead = match time.take() {
@@ -601,12 +602,15 @@ pub(crate) fn tools(
 /// successful ones, several, are a count of what they did, unfolded by `whole`
 /// into a row each. Only what the model recorded is said: a call in an agent
 /// that is no longer running has no result, which is not a failure or a success.
+/// `whole` also shows what each call was given and what it returned, wrapped to
+/// `width`.
 fn call_rows(
     model: &SessionModel,
     id: &str,
     by: Option<&str>,
     calls: &[&ToolCallInfo],
     whole: bool,
+    width: usize,
     now: Option<DateTime<Utc>>,
 ) -> Vec<(String, Tone)> {
     let running = model
@@ -639,8 +643,17 @@ fn call_rows(
         }
     };
     let by = by.map(|by| format!("{by} · ")).unwrap_or_default();
+    // A call's row at `indent`, and under it, when `whole`, what it held.
+    let shown = |call: &ToolCallInfo, by: &str, indent: usize| {
+        let (head, tone) = row(call, by);
+        let mut rows = vec![(format!("{}{head}", " ".repeat(indent)), tone)];
+        if whole {
+            rows.extend(detail(call, indent + 2, width));
+        }
+        rows
+    };
     if calls.len() < 2 {
-        return calls.iter().map(|call| row(call, &by)).collect();
+        return calls.iter().flat_map(|call| shown(call, &by, 0)).collect();
     }
     // Tools by what they did, in the order they first did it.
     let mut tally: Vec<(String, usize)> = Vec::new();
@@ -662,12 +675,49 @@ fn call_rows(
     );
     let mut rows = vec![(head, Tone::Quiet)];
     if whole {
-        rows.extend(calls.iter().map(|call| {
-            let (text, tone) = row(call, "");
-            (format!("  {text}"), tone)
-        }));
+        rows.extend(calls.iter().flat_map(|call| shown(call, "", 2)));
     }
     rows
+}
+
+/// What a call was given and what it returned, whole, under its row: each line
+/// as it was written, indented by `indent`, and wrapped at `width` columns
+/// where it would run past them. Control characters are not drawn, so output
+/// that colors itself cannot reach the terminal.
+fn detail(call: &ToolCallInfo, indent: usize, width: usize) -> Vec<(String, Tone)> {
+    let pad = " ".repeat(indent);
+    let room = width.saturating_sub(indent + 2).max(8);
+    [("input", &call.input), ("output", &call.output)]
+        .into_iter()
+        .filter_map(|(label, text)| Some((label, text.as_deref()?)))
+        .flat_map(|(label, text)| {
+            let lines = text.lines().flat_map(|line| cut(&drawable(line), room));
+            let lines = lines.map(|line| (format!("{pad}  {line}"), Tone::Quiet));
+            std::iter::once((format!("{pad}{label}"), Tone::Quiet)).chain(lines)
+        })
+        .collect()
+}
+
+/// `line` without the characters a terminal would act on, tabs as spaces.
+fn drawable(line: &str) -> String {
+    line.replace('\t', "    ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
+/// `line` in pieces of at most `width` columns, cut where the width ends.
+fn cut(line: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+    let mut pieces = Vec::new();
+    let mut rest = line;
+    while rest.width() > width {
+        let at = split_at_width(rest, width);
+        pieces.push(rest[..at].to_string());
+        rest = &rest[at..];
+    }
+    pieces.push(rest.to_string());
+    pieces
 }
 
 /// A call as a verb and its object: `run cargo test`, `edit feed.rs`.

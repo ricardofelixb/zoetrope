@@ -1003,7 +1003,7 @@ pub(crate) fn wrap(text: &str, width: usize, max_lines: usize) -> Vec<String> {
 /// Byte index splitting `s` at no more than `cols` display columns — but at
 /// least one char, so a single char wider than `cols` still advances (no
 /// infinite hard-split loop).
-fn split_at_width(s: &str, cols: usize) -> usize {
+pub(crate) fn split_at_width(s: &str, cols: usize) -> usize {
     use unicode_width::UnicodeWidthChar;
     let mut w = 0;
     for (i, ch) in s.char_indices() {

@@ -195,7 +195,7 @@ bar to seek · `?` for everything else.
 | click | open an agent's detail panel: its activity (what it did, what failed, what it said), and its tools as one line |
 | `j` / `k` / `PgUp` / `PgDn` | scroll the detail panel |
 | `v` | switch the panel between Activity and the Full transcript (thinking, whole reports, every tool call) |
-| `x` | expand what the panel folded: long briefs and reports, runs of tool calls |
+| `x` | expand what the panel folded: long briefs and reports, runs of tool calls, and under each call its whole input and output |
 | `i` | session info overlay |
 | `enter` | run `--on-enter` for the selected agent's session |
 | `?` | help overlay |
