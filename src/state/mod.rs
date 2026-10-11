@@ -193,7 +193,7 @@ pub struct App {
     /// Scroll offset for the selected agent's tool-call list in the detail
     /// panel. The renderer clamps this to the real maximum and writes it back, so
     /// it always reflects the actual top line (the scroll indicator reads it).
-    pub detail_scroll: u16,
+    pub detail_scroll: usize,
     /// Whether the detail panel auto-tails (bottom-anchors to the newest tool
     /// call). True by default and after selecting an agent; scrolling up detaches
     /// it; scrolling back to the bottom re-attaches. Independent of the camera.
@@ -1161,8 +1161,7 @@ impl App {
             self.detail_follow = false;
         }
         self.detail_down |= delta > 0;
-        self.detail_scroll =
-            (i32::from(self.detail_scroll) + delta).clamp(0, i32::from(u16::MAX)) as u16;
+        self.detail_scroll = self.detail_scroll.saturating_add_signed(delta as isize);
         true
     }
 

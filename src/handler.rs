@@ -388,7 +388,7 @@ fn scroll_detail(app: &mut App, delta: i32) -> bool {
         app.detail_follow = false;
     }
     app.detail_down |= delta > 0;
-    app.detail_scroll = (app.detail_scroll as i32 + delta).max(0) as u16;
+    app.detail_scroll = app.detail_scroll.saturating_add_signed(delta as isize);
     true
 }
 
@@ -793,6 +793,10 @@ mod tests {
         assert!(!app.wheel_panel(5, 5, 3), "outside it");
         assert!(app.wheel_panel(12, 5, -3));
         assert!(!app.detail_follow, "up stops following");
+        // A feed of more than a u16's rows scrolls on past them.
+        app.detail_scroll = 70_000;
+        assert!(app.wheel_panel(12, 5, 3));
+        assert_eq!(app.detail_scroll, 70_003);
     }
 
     #[test]

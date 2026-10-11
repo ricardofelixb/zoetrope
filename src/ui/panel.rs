@@ -99,10 +99,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     // The conversation tails the newest line by default; scrolling up detaches
     // it. The renderer clamps the offset to the real maximum and writes it (and
     // the re-attach) back, so the indicator and the next keypress agree.
-    let total = lines.len().min(u16::MAX as usize) as u16;
+    let total = lines.len();
     let (scroll, follow) = resolve_scroll(
         total,
-        talk_inner.height,
+        talk_inner.height as usize,
         *detail_scroll,
         *detail_follow,
         std::mem::take(detail_down),
@@ -115,7 +115,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     if follow {
         *detail_seen = None;
     }
-    if total > talk_inner.height {
+    if total > talk_inner.height as usize {
         let label = match said.saturating_sub(seen) {
             _ if follow => " ↕ wheel · j/k ".to_string(),
             0 => format!(" ↕ {scroll}/{total} "),
@@ -139,7 +139,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     } else {
         lines
             .into_iter()
-            .skip(scroll as usize)
+            .skip(scroll)
             .take(talk_inner.height as usize)
             .collect()
     };
@@ -245,7 +245,13 @@ fn fmt_counts(agent: &AgentInfo) -> Option<String> {
 /// bottom (or content that fits) re-attaches, but only on a scroll `down`: content
 /// that shrinks under a detached reader leaves them detached. Returns
 /// `(offset, tailing)`.
-fn resolve_scroll(total: u16, height: u16, scroll: u16, follow: bool, down: bool) -> (u16, bool) {
+fn resolve_scroll(
+    total: usize,
+    height: usize,
+    scroll: usize,
+    follow: bool,
+    down: bool,
+) -> (usize, bool) {
     let max = total.saturating_sub(height);
     let offset = if follow { max } else { scroll.min(max) };
     (offset, follow || down && offset >= max)
@@ -295,6 +301,12 @@ mod tests {
         assert_eq!(resolve_scroll(20, 8, 99, false, true), (12, true));
         // Content that shrank under a detached reader leaves them detached.
         assert_eq!(resolve_scroll(20, 8, 31, false, false), (12, false));
+        // A feed longer than a u16 counts is still reachable to its last row.
+        assert_eq!(resolve_scroll(70_000, 10, 0, true, false), (69_990, true));
+        assert_eq!(
+            resolve_scroll(70_000, 10, 66_000, false, false),
+            (66_000, false)
+        );
     }
 
     use chrono::TimeZone;
