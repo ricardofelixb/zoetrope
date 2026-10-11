@@ -887,6 +887,49 @@ mod tests {
         assert_eq!(rewritten.facts[0].kind, birth.facts[0].kind);
     }
 
+    /// The births of the lines, as the statements a job's tree is folded from.
+    fn births(lines: &[&str]) -> Vec<Vec<Fact>> {
+        lines
+            .iter()
+            .map(|line| match parse_line(line) {
+                Some(Line::Group(group)) => group_statement(&group).facts,
+                Some(Line::Member(e)) => Member::new(e.member.clone(), &e).birth().facts,
+                other => panic!("expected a group or a member, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_member_hangs_under_another_member_in_any_read_order() {
+        let statements = births(&[
+            r#"{"group":"c-1","label":"conductor","ts":"2026-10-06T10:00:00Z"}"#,
+            r#"{"member":"plan","parent":"c-1","session":"s","ts":"2026-10-06T10:01:00Z"}"#,
+            r#"{"member":"probe","parent":"plan","session":"t","ts":"2026-10-06T10:02:00Z"}"#,
+            r#"{"member":"top","session":"u","ts":"2026-10-06T10:03:00Z"}"#,
+            r#"{"member":"deep","parent":"top","session":"v","ts":"2026-10-06T10:04:00Z"}"#,
+        ]);
+        let mut orders = vec![(0..statements.len()).collect::<Vec<_>>()];
+        orders.push(orders[0].iter().rev().copied().collect());
+        // A child before its parent, a parent before its group.
+        orders.push(vec![2, 4, 1, 3, 0]);
+        orders.push(vec![4, 2, 3, 1, 0]);
+        orders.push(vec![1, 3, 2, 4, 0]);
+        for order in orders {
+            let facts: Vec<&Fact> = order.iter().flat_map(|&i| &statements[i]).collect();
+            let model = fold(&facts);
+            let parent = |id: &str| model.agent(id).unwrap().parent.clone();
+            assert_eq!(parent("c-1").as_deref(), Some(MAIN_ID), "{order:?}");
+            assert_eq!(parent("plan").as_deref(), Some("c-1"), "{order:?}");
+            assert_eq!(parent("probe").as_deref(), Some("plan"), "{order:?}");
+            assert_eq!(parent("top").as_deref(), Some(MAIN_ID), "{order:?}");
+            assert_eq!(parent("deep").as_deref(), Some("top"), "{order:?}");
+            for member in ["plan", "probe", "top", "deep"] {
+                assert_eq!(model.agent(member).unwrap().kind, AgentKind::Subagent);
+            }
+            assert_eq!(model.agent_count(), 6, "no placeholder is left: {order:?}");
+        }
+    }
+
     #[test]
     fn gone_hides_a_group_with_its_members_until_stated_again() {
         let Some(Line::Gone(gone)) = parse_line(r#"{"gone":"c-1","ts":"2026-10-06T10:05:00Z"}"#)
