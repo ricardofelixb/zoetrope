@@ -15,8 +15,9 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
 use chrono::{DateTime, Utc};
 
-use crate::state::App;
 use crate::state::session::AgentInfo;
+use crate::state::{App, DetailView};
+use crate::ui::nodes::fmt_tokens;
 use crate::ui::{talk, truncate};
 
 /// Render the detail panel for `agent_id` into `area`.
@@ -82,6 +83,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, agent_id: &str) {
     let talk_block = Block::default()
         .borders(Borders::TOP)
         .border_style(bg.fg(palette.muted))
+        .title_top(view_tabs(*detail_view, *whole_prompts, bg, &palette))
         .style(bg);
     let talk_inner = talk_block.inner(talk_area);
     let lines = talk::lines(
@@ -173,9 +175,13 @@ fn render_header(
         agent.status_word(),
         bg.fg(crate::ui::status_color(agent.status, palette)),
     )];
-    for part in [agent.model.clone(), fmt_timing(agent, now)]
-        .into_iter()
-        .flatten()
+    for part in [
+        agent.model.clone(),
+        fmt_timing(agent, now),
+        fmt_counts(agent),
+    ]
+    .into_iter()
+    .flatten()
     {
         status.push(Span::styled(format!("  {part}"), bg.fg(palette.subtle)));
     }
@@ -191,6 +197,46 @@ fn render_header(
     }
 
     frame.render_widget(Paragraph::new(lines).style(bg), area);
+}
+
+/// The panel's view, as tabs over the conversation: which one it is in, and the
+/// key for the other. Expanded, it says so.
+fn view_tabs(
+    view: DetailView,
+    whole: bool,
+    bg: Style,
+    palette: &rataflow::Palette,
+) -> Line<'static> {
+    let tab = |name: &'static str, on: bool| {
+        if on {
+            Span::styled(name, bg.fg(palette.accent).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(name, bg.fg(palette.subtle))
+        }
+    };
+    let mut tabs = vec![
+        Span::styled(" ", bg),
+        tab("Activity", view == DetailView::Activity),
+        Span::styled(" · ", bg.fg(palette.muted)),
+        tab("Full transcript", view == DetailView::Transcript),
+        Span::styled(" · v ", bg.fg(palette.subtle)),
+    ];
+    if whole {
+        tabs.push(Span::styled("· expanded ", bg.fg(palette.accent)));
+    }
+    Line::from(tabs)
+}
+
+/// What the agent has used so far, as its card says it: tool calls, then output
+/// tokens. Nothing before there is something to count.
+fn fmt_counts(agent: &AgentInfo) -> Option<String> {
+    let tools = agent.tool_calls().len();
+    let parts = [
+        (tools > 0).then(|| format!("⚒ {tools}")),
+        (agent.output_tokens > 0).then(|| format!("{} tok", fmt_tokens(agent.output_tokens))),
+    ];
+    let parts: Vec<String> = parts.into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// Resolve the panel's scroll offset for one render: clamp to the reachable
@@ -289,6 +335,30 @@ mod tests {
             Some("⏱ 10s"),
             "a finished agent stops"
         );
+    }
+
+    #[test]
+    fn counts_are_the_cards_and_say_nothing_before_there_are_any() {
+        let mut a = agent_with_ts(None, None);
+        assert_eq!(fmt_counts(&a), None);
+        a.output_tokens = 1_500;
+        assert_eq!(fmt_counts(&a).as_deref(), Some("1.5k tok"));
+    }
+
+    #[test]
+    fn the_tabs_say_which_view_and_the_key_for_the_other() {
+        let text = |view, whole| -> String {
+            view_tabs(view, whole, Style::default(), &rataflow::Palette::DARK)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        assert_eq!(
+            text(DetailView::Activity, false),
+            " Activity · Full transcript · v "
+        );
+        assert!(text(DetailView::Transcript, true).ends_with("· v · expanded "));
     }
 
     #[test]

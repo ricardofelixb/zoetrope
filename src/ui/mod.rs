@@ -706,7 +706,10 @@ fn render_help(frame: &mut Frame, area: Rect, palette: &rataflow::Palette) {
         ]),
         Line::from(vec![
             Span::styled(" panel     ", key),
-            Span::styled("j/k · pgup/pgdn scroll · x whole prompts · esc close", txt),
+            Span::styled(
+                "j/k · pgup/pgdn scroll · v activity/transcript · x expand · esc close",
+                txt,
+            ),
         ]),
         Line::from(vec![
             Span::styled(" timeline  ", key),

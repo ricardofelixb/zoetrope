@@ -192,9 +192,10 @@ bar to seek · `?` for everything else.
 | `h` `j` `k` `l` | pan the graph |
 | `+` / `-` / `0` | zoom in / out / reset |
 | `c` | center on the selected agent |
-| click | open an agent's detail panel: its conversation, and its tools as one line |
+| click | open an agent's detail panel: its activity (what it did, what failed, what it said), and its tools as one line |
 | `j` / `k` / `PgUp` / `PgDn` | scroll the detail panel |
-| `x` | show the panel's long prompts whole |
+| `v` | switch the panel between Activity and the Full transcript (thinking, whole reports, every tool call) |
+| `x` | expand what the panel folded: long briefs and reports, runs of tool calls |
 | `i` | session info overlay |
 | `enter` | run `--on-enter` for the selected agent's session |
 | `?` | help overlay |
