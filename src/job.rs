@@ -20,14 +20,26 @@
 //! One manifest can hold several armies, each drawn as its own tree: a
 //! `group` line is a node under the job's root, and a member line naming it as
 //! its `parent` hangs its root under the group instead (a member naming a group
-//! whose line is not read yet still hangs under it). A `gone` line takes a group
-//! or member off the canvas and out of the counts, with everything under it, and
-//! a later `group` or member line for the same key shows it again, whichever
-//! order they are read in.
+//! whose line is not read yet still hangs under it). A `parent` may also name
+//! another member, which hangs this member's root under that member's root
+//! card (its first session, when the key has run more than once), in whichever
+//! order their lines are read; a parent that would loop back to the member
+//! hangs it under the job's root. A `gone` line takes a group or member off the
+//! canvas and out of the counts, with everything under it, and a later `group`
+//! or member line for the same key shows it again, whichever order they are
+//! read in.
+//!
+//! A group says where its army works, in optional fields its card and panel
+//! show: `cwd` (the conductor's folder, absolute), `branch` (its git branch) and
+//! `title` (its session's name, or else its first prompt). A later `group` line
+//! for the same key replaces the fields it states and leaves the ones it omits,
+//! so a writer carries every field it knows forward; a line without them draws
+//! the group as before.
 //!
 //! ```text
-//! {"group":"conductor-1","label":"Claude (conductor)","ts":"…"}
+//! {"group":"conductor-1","label":"Claude (conductor)","cwd":"/home/me/zoetrope/web","branch":"main","title":"fix token refresh on resume","ts":"…"}
 //! {"member":"plan","parent":"conductor-1","label":"plan: Opus (claude)","session":"6f1c2a9e-…","ts":"…"}
+//! {"member":"explore","parent":"plan","label":"explore: Haiku (claude)","session":"0b7d3c41-…","ts":"…"}
 //! {"gone":"conductor-1","ts":"…"}
 //! ```
 //!
@@ -47,6 +59,10 @@
 //! the one translation a shared tree needs, [`Member::rewrite`]: every member
 //! calls its own root `"main"`, so a member's ids are renamed into its own
 //! namespace and its root is hung under the job's (which is not drawn).
+//!
+//! A group's label, title, folder and branch travel as one [`Declaration`]: the
+//! label and title are the node's `agent_type` and `description`, as for any
+//! agent, and the folder and branch are its only new fields.
 
 use std::path::{Path, PathBuf};
 
@@ -106,7 +122,8 @@ pub struct Entry {
     /// What the member was asked to do.
     #[serde(default)]
     pub task: Option<String>,
-    /// The group the member's root hangs under; the job's root when absent.
+    /// The group or member the member's root hangs under; the job's root when
+    /// absent.
     #[serde(default)]
     pub parent: Option<String>,
     #[serde(default)]
