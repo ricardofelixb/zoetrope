@@ -507,6 +507,10 @@ impl SessionModel {
                         && *kind != AgentKind::Group
                     {
                         a.kind = *kind;
+                        // The placeholder hung under the root; it says where it hangs.
+                        if parent.is_some() {
+                            a.parent = parent.clone();
+                        }
                         if !a.terminal {
                             a.status = AgentStatus::Running;
                         }
