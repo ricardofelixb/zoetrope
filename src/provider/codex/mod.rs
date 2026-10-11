@@ -194,6 +194,7 @@ impl Stream {
                                 call: call.clone(),
                                 name: name.clone(),
                                 summary,
+                                input: None,
                             }));
                             if is_spawn_tool(&name) {
                                 out.push(by(FactKind::Spawn {
@@ -209,6 +210,7 @@ impl Stream {
                             out.push(by(FactKind::ToolEnd {
                                 call: call.clone(),
                                 outcome: Outcome::Ok,
+                                output: None,
                             }));
                         }
                     }
@@ -220,6 +222,7 @@ impl Stream {
                                 call: call.clone(),
                                 name,
                                 summary,
+                                input: None,
                             }));
                         }
                     }
@@ -236,6 +239,7 @@ impl Stream {
                             out.push(by(FactKind::ToolEnd {
                                 call: call.clone(),
                                 outcome,
+                                output: None,
                             }));
                         }
                     }
@@ -318,6 +322,7 @@ impl Stream {
                     call: call.clone(),
                     name,
                     summary,
+                    input: None,
                 },
             });
             out.push(Fact {
@@ -326,6 +331,7 @@ impl Stream {
                 kind: FactKind::ToolEnd {
                     call: call.clone(),
                     outcome,
+                    output: None,
                 },
             });
         };
@@ -642,7 +648,7 @@ mod tests {
         let start = s.push(r#"{"timestamp":"2026-08-26T16:10:54.748Z","ordinal":1,"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_1","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"cargo test\", \"workdir\":\"/p\"});"}}"#).unwrap();
         assert!(matches!(
             &start.facts[0].kind,
-            FactKind::ToolStart { call, name, summary } if call == "call_1" && name == "exec" && summary.as_deref() == Some("cargo test")
+            FactKind::ToolStart { call, name, summary, .. } if call == "call_1" && name == "exec" && summary.as_deref() == Some("cargo test")
         ));
         let ran = s.push(r#"{"timestamp":"2026-08-26T16:10:54.934Z","ordinal":2,"type":"event_msg","payload":{"type":"item_completed","thread_id":"a","item":{"type":"CommandExecution","id":"exec-1","command":["/bin/zsh","-lc","cargo test"],"parsed_cmd":[{"type":"unknown","cmd":"cargo test"}],"status":"failed","exit_code":101},"started_at_ms":1787760650000,"completed_at_ms":1787760654000}}"#).unwrap();
         assert!(
@@ -658,7 +664,7 @@ mod tests {
         assert!(ran.facts[0].ts < ran.facts[1].ts, "start before end");
         let end = s.push(r#"{"timestamp":"2026-08-26T16:10:54.947Z","ordinal":3,"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_1","output":[{"type":"input_text","text":"Script completed\nWall time 0.2 seconds\nOutput:\n"}]}}"#).unwrap();
         assert!(
-            matches!(&end.facts[0].kind, FactKind::ToolEnd { call, outcome: Outcome::Ok } if call == "call_1")
+            matches!(&end.facts[0].kind, FactKind::ToolEnd { call, outcome: Outcome::Ok, .. } if call == "call_1")
         );
         let host = s.push(r#"{"timestamp":"2026-08-26T16:10:55.947Z","ordinal":4,"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_2","output":[{"type":"input_text","text":"timed out negotiating with the code-mode host"}]}}"#).unwrap();
         assert!(matches!(

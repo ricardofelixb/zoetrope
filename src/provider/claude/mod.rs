@@ -279,6 +279,7 @@ fn facts_after(source: &Source, entry: &Entry, carried: &mut Option<String>) -> 
                                 call: call.clone(),
                                 name: name.clone(),
                                 summary,
+                                input: None,
                             }));
                             if is_spawn_tool(&name) {
                                 out.push(about(FactKind::Spawn {
@@ -363,6 +364,7 @@ fn facts_after(source: &Source, entry: &Entry, carried: &mut Option<String>) -> 
                             kind: FactKind::ToolEnd {
                                 call: call.clone(),
                                 outcome,
+                                output: None,
                             },
                         });
                     }

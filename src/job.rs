@@ -472,14 +472,21 @@ impl Member {
                     call,
                     name,
                     summary,
+                    input,
                 } => FactKind::ToolStart {
                     call: self.call(&call),
                     name,
                     summary,
+                    input,
                 },
-                FactKind::ToolEnd { call, outcome } => FactKind::ToolEnd {
+                FactKind::ToolEnd {
+                    call,
+                    outcome,
+                    output,
+                } => FactKind::ToolEnd {
                     call: self.call(&call),
                     outcome,
+                    output,
                 },
                 FactKind::Spawn { call, reason } => FactKind::Spawn {
                     call: self.call(&call),
@@ -647,6 +654,7 @@ mod tests {
                         call: "c1".into(),
                         name: "Task".into(),
                         summary: None,
+                        input: None,
                     },
                 ),
                 fact(
@@ -661,6 +669,7 @@ mod tests {
                     FactKind::ToolEnd {
                         call: "c2".into(),
                         outcome: Outcome::Ok,
+                        output: None,
                     },
                 ),
                 fact(

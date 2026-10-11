@@ -800,6 +800,7 @@ mod tests {
             call: format!("c-{summary}"),
             name: name.into(),
             summary: Some(summary.into()),
+            input: None,
         };
         apply(&mut model, "review", 2, call("Bash", "git diff"));
         apply(
@@ -809,6 +810,7 @@ mod tests {
             FactKind::ToolEnd {
                 call: "c-git diff".into(),
                 outcome: Outcome::Err,
+                output: None,
             },
         );
         apply(
@@ -1043,6 +1045,7 @@ mod tests {
                 call: "t".into(),
                 name: "Bash".into(),
                 summary: Some("git diff".into()),
+                input: None,
             },
         );
         apply(
@@ -1141,6 +1144,7 @@ mod tests {
             call: call.into(),
             name: name.into(),
             summary: Some(summary.into()),
+            input: None,
         };
         apply(model, MAIN_ID, minute, start);
     }
@@ -1149,6 +1153,7 @@ mod tests {
         let end = FactKind::ToolEnd {
             call: call.into(),
             outcome,
+            output: None,
         };
         apply(model, MAIN_ID, minute, end);
     }

@@ -104,6 +104,7 @@ impl Stream {
                                             call: id.clone(),
                                             name: name.clone(),
                                             summary: summarize(arguments, self.cwd.as_deref()),
+                                            input: None,
                                         }));
                                     }
                                     _ => {}
@@ -124,6 +125,7 @@ impl Stream {
                             } else {
                                 Outcome::Ok
                             },
+                            output: None,
                         })
                     })),
                     _ => {}

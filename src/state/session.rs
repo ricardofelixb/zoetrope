@@ -218,6 +218,11 @@ pub struct ToolCallInfo {
     pub name: String,
     /// Short human summary (e.g. a command or path), if derivable.
     pub summary: Option<String>,
+    /// The whole input, which the summary is a cut of.
+    pub input: Option<String>,
+    /// What the tool returned, whole. `None` while pending, or when the record
+    /// carries no text.
+    pub output: Option<String>,
     /// Timestamp of the `tool_use` (when the tool started).
     pub ts: Option<DateTime<Utc>>,
     /// Timestamp of the `tool_result` (when it finished). `None` while pending.
@@ -755,6 +760,7 @@ impl SessionModel {
                 call,
                 name,
                 summary,
+                input,
             } => {
                 if let Some(a) = self.agents.get_mut(id)
                     && !a.tool_index.contains_key(call)
@@ -764,6 +770,8 @@ impl SessionModel {
                         id: call.clone(),
                         name: name.clone(),
                         summary: summary.clone(),
+                        input: input.clone(),
+                        output: None,
                         ts: fact.ts,
                         end_ts: None,
                         state: ToolState::Pending,
@@ -784,8 +792,12 @@ impl SessionModel {
                         reasoning,
                     });
             }
-            FactKind::ToolEnd { call, outcome } => {
-                self.complete_tool(id, call, *outcome == Outcome::Err, fact.ts);
+            FactKind::ToolEnd {
+                call,
+                outcome,
+                output,
+            } => {
+                self.complete_tool(id, call, *outcome == Outcome::Err, output, fact.ts);
             }
             FactKind::Ended(status) => {
                 self.ended.insert(id.to_string(), *status);
@@ -803,6 +815,7 @@ impl SessionModel {
         owner: &str,
         call: &str,
         is_err: bool,
+        output: &Option<String>,
         end_ts: Option<DateTime<Utc>>,
     ) {
         let new_state = if is_err {
@@ -816,6 +829,7 @@ impl SessionModel {
             agent.tool_calls[i].state = new_state;
             // The result's timestamp is the tool's finish time → its duration.
             agent.tool_calls[i].end_ts = end_ts;
+            agent.tool_calls[i].output = output.clone();
         }
         // Record the fact first — the spawned agent may not exist yet (arrival
         // order is unguaranteed) — then resolve any agent already present.
@@ -1279,6 +1293,8 @@ mod tests {
                     id: id.into(),
                     name: name.into(),
                     summary: Some(summary.into()),
+                    input: None,
+                    output: None,
                     ts: Some(ts(t)),
                     end_ts: end.map(ts),
                     state,
@@ -1493,6 +1509,8 @@ mod tests {
                 id: "call1".into(),
                 name: "Agent".into(),
                 summary: Some("hunt bugs".into()),
+                input: None,
+                output: None,
                 ts: Some(ts("2026-06-05T10:00:00Z")),
                 end_ts: None,
                 state: ToolState::Ok,
@@ -2184,6 +2202,8 @@ mod tests {
             id: "b".into(),
             name: "Bash".into(),
             summary: None,
+            input: None,
+            output: None,
             ts: Some(t("2026-06-05T10:00:00.000Z")),
             end_ts: None,
             state: ToolState::Pending,
@@ -2201,6 +2221,8 @@ mod tests {
             id: "c".into(),
             name: "x".into(),
             summary: None,
+            input: None,
+            output: None,
             ts: None,
             end_ts: None,
             state: ToolState::Pending,
