@@ -489,6 +489,8 @@ pub struct FileChange {
     #[serde(default)]
     pub changes: serde_json::Map<String, serde_json::Value>,
     pub status: Option<String>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

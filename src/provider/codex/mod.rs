@@ -381,12 +381,19 @@ impl Stream {
                     .map(|p| short_path(p, self.cwd.as_deref()))
                     .collect();
                 let summary = (!files.is_empty()).then(|| truncate_summary(&files.join(", ")));
-                let input = (!files.is_empty()).then(|| files.join("\n"));
+                let patch: Vec<String> = f.changes.iter().map(|(p, c)| patch_text(p, c)).collect();
+                let input = (!patch.is_empty()).then(|| patch.join("\n"));
+                let printed: Vec<&str> = [&f.stdout, &f.stderr]
+                    .into_iter()
+                    .filter_map(|text| text.as_deref())
+                    .filter(|text| !text.is_empty())
+                    .collect();
+                let output = (!printed.is_empty()).then(|| printed.join("\n"));
                 let outcome = match f.status.as_deref() {
                     Some("failed") => Outcome::Err,
                     _ => Outcome::Ok,
                 };
-                ran(&f.id, "apply_patch".into(), summary, input, outcome, None);
+                ran(&f.id, "apply_patch".into(), summary, input, outcome, output);
             }
             Item::SubAgentActivity(a) => {
                 let Some(child) = &a.agent_thread_id else {
@@ -487,6 +494,21 @@ fn whole_arguments(arguments: &str) -> Option<String> {
         Ok(value) => full_input(&value),
         Err(_) => Some(arguments.to_string()),
     }
+}
+
+/// One file's change as a patch reads: what was done to the file, where it
+/// moved to, then its diff (or, for a new file, its content).
+fn patch_text(path: &str, change: &serde_json::Value) -> String {
+    let text = |key: &str| change.get(key).and_then(serde_json::Value::as_str);
+    let mut out = format!("{} {path}", text("type").unwrap_or("change"));
+    if let Some(to) = text("move_path") {
+        out.push_str(&format!(" -> {to}"));
+    }
+    if let Some(body) = text("unified_diff").or(text("content")) {
+        out.push('\n');
+        out.push_str(body);
+    }
+    out
 }
 
 /// One line for a collaboration or built-in function call.
@@ -807,5 +829,57 @@ mod tests {
             &out[0].kind,
             FactKind::ToolEnd { output: Some(o), .. } if o == "sent"
         ));
+    }
+
+    /// A patch keeps its diff, and what it printed, as the capture has them:
+    /// each changed file named with what was done to it, then its diff (or,
+    /// for a new file, its content), and stdout and stderr as output.
+    #[test]
+    fn a_patch_keeps_its_diff_and_what_it_printed() {
+        let Some(dir) = crate::provider::harness::fixture_dir("codex") else {
+            return;
+        };
+        let mut patches = 0;
+        for fixture in std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()) {
+            if !fixture.is_dir() {
+                continue;
+            }
+            for rollout in discovery::all_rollouts(&fixture) {
+                let text = std::fs::read_to_string(&rollout).unwrap();
+                let mut stream = Stream::new();
+                for line in text.lines() {
+                    let statement = stream.push(line);
+                    if !line.contains(r#""type":"FileChange""#) {
+                        continue;
+                    }
+                    let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                    let item = &record["payload"]["item"];
+                    let facts = statement.expect("a patch states its facts").facts;
+                    let input = facts.iter().find_map(|f| match &f.kind {
+                        FactKind::ToolStart { input, .. } => input.clone(),
+                        _ => None,
+                    });
+                    let output = facts.iter().find_map(|f| match &f.kind {
+                        FactKind::ToolEnd { output, .. } => output.clone(),
+                        _ => None,
+                    });
+                    let input = input.expect("the patch is its input");
+                    for (path, change) in item["changes"].as_object().unwrap() {
+                        let kind = change["type"].as_str().unwrap();
+                        assert!(input.contains(&format!("{kind} {path}")), "{input}");
+                        let body = change["unified_diff"]
+                            .as_str()
+                            .or(change["content"].as_str())
+                            .unwrap();
+                        assert!(input.contains(body), "{path}: {input}");
+                    }
+                    let stdout = item["stdout"].as_str().unwrap_or_default();
+                    let output = output.unwrap_or_default();
+                    assert!(output.contains(stdout), "{output:?} lacks {stdout:?}");
+                    patches += 1;
+                }
+            }
+        }
+        assert!(patches > 0, "no patch in the captures");
     }
 }
