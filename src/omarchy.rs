@@ -3,8 +3,9 @@
 //! Omarchy writes the current theme's colors to
 //! `~/.local/state/omarchy/current/theme/colors.toml` and replaces the whole
 //! `theme` folder on every `omarchy theme set` (a staged `next-theme` is moved
-//! over it), so the watch is on `current/`, not on the file, and every change
-//! reads the file afresh. Where that file is absent, unreadable or not a theme
+//! over it), so the watch is on `current/` and everything under it, not on the
+//! file or on `theme/`: either may be replaced from under a watch of its own.
+//! Every change reads the file afresh. Where that file is absent, unreadable or not a theme
 //! (macOS, Windows, a machine without Omarchy) the colors are zoetrope's own,
 //! and nothing is reported: a theme is a courtesy, never a failure.
 //!
@@ -37,7 +38,8 @@ fn entries(colors: &str) -> impl Iterator<Item = (&str, &str)> {
         let (key, value) = line.split_once('=')?;
         let value = value.trim();
         let quote = value.chars().next().filter(|c| matches!(c, '"' | '\''))?;
-        Some((key.trim(), value[1..].split(quote).next()?))
+        // A value that never closes is a file cut short, not a color.
+        Some((key.trim(), value[1..].split_once(quote)?.0))
     })
 }
 
@@ -90,8 +92,8 @@ fn resolve(current: &Path) -> Palette {
         .unwrap_or_else(|| base_palette(false))
 }
 
-/// A watch on `dir`, and a channel that hears of each change to it. Looking
-/// at the folder is not changing it. Dropping the watch closes the channel.
+/// A watch on `dir` and what is under it, and a channel that hears of each
+/// change. Looking at a file is not changing it. Dropping the watch closes the channel.
 fn watch(dir: &Path) -> Option<(RecommendedWatcher, mpsc::UnboundedReceiver<()>)> {
     let (touched_tx, touched) = mpsc::unbounded_channel();
     let mut watch = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -100,7 +102,7 @@ fn watch(dir: &Path) -> Option<(RecommendedWatcher, mpsc::UnboundedReceiver<()>)
         }
     })
     .ok()?;
-    watch.watch(dir, RecursiveMode::NonRecursive).ok()?;
+    watch.watch(dir, RecursiveMode::Recursive).ok()?;
     Some((watch, touched))
 }
 
