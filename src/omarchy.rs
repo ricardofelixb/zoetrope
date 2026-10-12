@@ -12,7 +12,7 @@
 //! The surface of a card and the subtle text are derived from them, so they
 //! stay off the background whatever the theme. The status colors are not the
 //! theme's: a near-monochrome theme would make running and failed look alike.
-//! See [`base_palette`](crate::state::graph::base_palette).
+//! See `state::graph::base_palette`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
