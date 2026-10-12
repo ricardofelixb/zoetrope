@@ -609,7 +609,10 @@ impl App {
                 let genuine = !self.is_current(&session_id) || self.flow.nodes().count() > 0;
                 self.current_session_id = session_id.clone();
                 self.session = SessionModel::new(session_id);
+                // The theme is the terminal's, not the session's.
+                let theme = self.flow.theme;
                 self.flow = graph::new_flow();
+                self.flow.theme = theme;
                 // A different session (or a truncated one) shares nothing with
                 // the rungs we hold, and a fresh `Timeline` restarts the
                 // generation counter — so they cannot be told apart by it.
