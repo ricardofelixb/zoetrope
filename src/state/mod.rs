@@ -1371,6 +1371,18 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_keeps_the_theme_the_flow_was_given() {
+        let mut palette = graph::base_palette(false);
+        palette.canvas_bg = ratatui::style::Color::Rgb(1, 2, 3);
+        let mut app = App::new("a".into(), Mode::Live);
+        app.flow.theme = rataflow::Theme::Custom(palette);
+        app.handle_ui_event(UiEvent::SessionReset {
+            session_id: "b".into(),
+        });
+        assert_eq!(app.flow.theme.palette(), palette);
+    }
+
+    #[test]
     fn announce_reset_preserves_camera_on_empty_graph() {
         // The tailer's initial announce is a same-id reset before any content:
         // a camera choice made while waiting must survive it.
