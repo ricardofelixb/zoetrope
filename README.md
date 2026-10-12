@@ -147,6 +147,10 @@ session from disk, or drop a transcript on the page. It stays local there too.
 - Tool calls surface as chips beneath their agent (`⚒ bash ×5`, or `⚒ bash 0.5s`
   ticking during a single call), resolving to `✓` or `✗`
 - A minimap showing where your viewport sits once the graph outgrows the screen
+- Follows your [Omarchy](https://omarchy.org) theme, live: the canvas, cards, borders
+  and text take its colors, and repaint as soon as you run `omarchy theme set`.
+  Running, done and failed keep their own green, gold and red whatever the theme.
+  Everywhere else, the colors are zoetrope's own
 
 **Time travel**
 - One scrubbable timeline over both live and replayed sessions
