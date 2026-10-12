@@ -609,7 +609,10 @@ impl App {
                 let genuine = !self.is_current(&session_id) || self.flow.nodes().count() > 0;
                 self.current_session_id = session_id.clone();
                 self.session = SessionModel::new(session_id);
+                // The theme is the terminal's, not the session's.
+                let theme = self.flow.theme;
                 self.flow = graph::new_flow();
+                self.flow.theme = theme;
                 // A different session (or a truncated one) shares nothing with
                 // the rungs we hold, and a fresh `Timeline` restarts the
                 // generation counter — so they cannot be told apart by it.
@@ -1368,6 +1371,18 @@ mod tests {
             statements: vec![meta_update("sub1")],
         });
         assert!(!replay.chips.is_seeded());
+    }
+
+    #[test]
+    fn a_reset_keeps_the_theme_the_flow_was_given() {
+        let mut palette = graph::base_palette(false);
+        palette.canvas_bg = ratatui::style::Color::Rgb(1, 2, 3);
+        let mut app = App::new("a".into(), Mode::Live);
+        app.flow.theme = rataflow::Theme::Custom(palette);
+        app.handle_ui_event(UiEvent::SessionReset {
+            session_id: "b".into(),
+        });
+        assert_eq!(app.flow.theme.palette(), palette);
     }
 
     #[test]

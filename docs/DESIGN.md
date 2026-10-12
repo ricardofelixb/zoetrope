@@ -64,6 +64,7 @@ crossterm = { version = "0.29", features = ["event-stream"], optional = true }
 tokio     = { version = "1", features = ["rt-multi-thread","macros","time","sync","fs","io-util"], optional = true }
 futures   = { version = "0.3", optional = true }
 anyhow    = { version = "1", optional = true }
+notify    = { version = "8", optional = true }   # the Omarchy theme is followed by notification, never polled
 # native also flips on ratatui/crossterm + rataflow/crossterm.
 
 # the library's own wasm need, under [target.'cfg(target_arch="wasm32")'.dependencies]
@@ -92,6 +93,7 @@ src/
 ├── tui.rs         # terminal lifecycle + the central native event loop (tick_camera/tick_timeline/status_tick/draw)
 ├── handler.rs     # input routing: app-level keys → App, the rest → the flow; scrubber clicks; process_flow_events
 ├── autopilot.rs   # native-only: the scripted pointer/keystroke pilot behind ZOETROPE_DEMO=1 (see DEMO-ASSETS.md)
+├── omarchy.rs     # native-only: the Omarchy theme as a rataflow Palette, and the watch on its folder that repaints a running zoe
 ├── fact.rs        # the provider boundary: Fact + FactKind, the vocabulary every provider speaks and the model folds
 ├── job.rs         # jobs: the manifest format and the rewrite that puts several sessions in one tree (DISCOVERY.md §8)
 ├── provider/
@@ -302,6 +304,7 @@ loop {
     tokio::select! {
         _ = tick.tick() => {}
         Some(ev) = ui_rx.recv() => app.handle_ui_event(ev),
+        Some(palette) = omarchy.changed() => app.flow.theme = Theme::Custom(palette),  // omarchy.rs: a theme set repaints
         Some(ev) = event_rx.recv() => if handler::handle_event(&ev, app, &tail_tx) { break },
     }
     while let Ok(ev) = event_rx.try_recv() { if handler::handle_event(&ev, app, &tail_tx) { break } }  // drain → no mouse lag
@@ -309,6 +312,8 @@ loop {
 }
 execute!(DisableMouseCapture); ratatui::restore()
 ```
+**Theme** (`omarchy.rs`, native only): the loop starts `omarchy::Follow` before its first frame and sets `app.flow.theme` from it, so every surface (all resolve from `flow.theme`) takes the colors of `~/.local/state/omarchy/current/theme/colors.toml`: `background`, `foreground` and `muted` become the canvas, text and borders, and the card surface and subtle text are mixed from them (`mode = "light"` picks the light base). The status colors stay `graph::base_palette`'s whatever the theme (`accent` gold, `success` green, `error` red; darker shades of the three on a light canvas), since a near-monochrome theme would make running and failed look alike. `omarchy theme set` replaces the whole `theme` folder (it moves a staged `next-theme` over it), so the watch is a recursive `notify` watch on `current/`, not on the file or on `theme/`, which a theme set (or an editor saving the file) replaces from under a watch of its own; a change is read once it has settled (100 ms) and sent only if the palette differs. A missing, unreadable or unusable file (no Omarchy, macOS, Windows) is zoetrope's own palette, silently. `SessionReset` rebuilds the flow and carries the theme over.
+
 The crossterm input channel is **unbounded** (input must never block); the **cap-32 bounded** channels (`CHANNEL_CAP`, `main.rs`) are the tailer-request + UI-event channels — they backpressure on `send().await`, and the tailer batches per tick so this is fine. Panic hook: `ratatui::init` installs screen restore but NOT mouse-capture disable — a custom hook layer also disables mouse capture.
 
 ## Graph sync (state/graph.rs — rwy's incremental pattern)

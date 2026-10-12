@@ -12,6 +12,7 @@ use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
 use crossterm::execute;
+use rataflow::Theme;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
@@ -59,6 +60,11 @@ pub async fn run(
             }
         }
     });
+
+    // The look is the Omarchy theme's, when there is one: now, and again each
+    // time it changes. Held for the run, so the watch stays open.
+    let mut omarchy = crate::omarchy::Follow::start();
+    app.flow.theme = Theme::Custom(omarchy.palette);
 
     // The view's state is kept once it has settled (a drag changes it every
     // frame): closing the pane kills zoe, so there may be no exit to keep it at.
@@ -122,6 +128,7 @@ pub async fn run(
         tokio::select! {
             _ = tick.tick() => {}
             Some(ev) = ui_rx.recv() => app.handle_ui_event(ev),
+            Some(palette) = omarchy.changed() => app.flow.theme = Theme::Custom(palette),
             Some(ev) = event_rx.recv() => {
                 if route(&ev, &mut app, &mut pilot, demo) {
                     break Ok(());
