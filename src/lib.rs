@@ -45,4 +45,6 @@ pub mod autopilot;
 #[cfg(feature = "native")]
 pub mod handler;
 #[cfg(feature = "native")]
+pub mod omarchy;
+#[cfg(feature = "native")]
 pub mod tui;

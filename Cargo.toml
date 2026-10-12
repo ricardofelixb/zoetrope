@@ -48,6 +48,7 @@ native = [
   "dep:crossterm",
   "dep:futures",
   "dep:anyhow",
+  "dep:notify",
   "ratatui/crossterm",
   "rataflow/crossterm",
 ]
@@ -86,6 +87,9 @@ tokio = { version = "1", features = [
 ], optional = true }
 futures = { version = "0.3", optional = true }
 anyhow = { version = "1", optional = true }
+# Native change notification (inotify, FSEvents, ReadDirectoryChangesW): the
+# Omarchy theme is followed by being told it changed, never by polling for it.
+notify = { version = "8", optional = true }
 # Persistent collections: cloning a `SessionModel` shares structure instead of
 # copying it, which is what makes a snapshot ladder rung O(1).
 imbl = "7.0.1"
