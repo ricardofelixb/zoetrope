@@ -90,6 +90,41 @@ fn resolve(current: &Path) -> Palette {
         .unwrap_or_else(|| base_palette(false))
 }
 
+/// A watch on `dir`, and a channel that hears of each change to it. Looking
+/// at the folder is not changing it. Dropping the watch closes the channel.
+fn watch(dir: &Path) -> Option<(RecommendedWatcher, mpsc::UnboundedReceiver<()>)> {
+    let (touched_tx, touched) = mpsc::unbounded_channel();
+    let mut watch = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if event.is_ok_and(|e| !e.kind.is_access()) {
+            let _ = touched_tx.send(());
+        }
+    })
+    .ok()?;
+    watch.watch(dir, RecursiveMode::NonRecursive).ok()?;
+    Some((watch, touched))
+}
+
+/// Read the theme in `dir` once each change has settled, and send it if it is
+/// not the one already `shown`. Ends when `touched` closes or `tx` does.
+async fn repaint(
+    mut touched: mpsc::UnboundedReceiver<()>,
+    dir: PathBuf,
+    mut shown: Palette,
+    tx: mpsc::UnboundedSender<Palette>,
+) {
+    while touched.recv().await.is_some() {
+        tokio::time::sleep(SETTLE).await;
+        while touched.try_recv().is_ok() {}
+        let now = resolve(&dir);
+        if now != shown {
+            shown = now;
+            if tx.send(now).is_err() {
+                break;
+            }
+        }
+    }
+}
+
 /// The palette now in effect, and the ones that follow it.
 pub struct Follow {
     pub palette: Palette,
@@ -108,42 +143,14 @@ impl Follow {
     /// to the folder. Needs a tokio runtime.
     pub fn at(current: &Path) -> Follow {
         let palette = resolve(current);
-        let (touched_tx, mut touched) = mpsc::unbounded_channel();
-        let watch = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            // Looking at the folder is not changing it.
-            if event.is_ok_and(|e| !e.kind.is_access()) {
-                let _ = touched_tx.send(());
-            }
-        })
-        .and_then(|mut watch| {
-            watch
-                .watch(current, RecursiveMode::NonRecursive)
-                .map(|()| watch)
-        })
-        .ok();
-        let Some(watch) = watch else {
+        let Some((watch, touched)) = watch(current) else {
             return Follow {
                 palette,
                 ..Follow::unthemed()
             };
         };
-
         let (tx, changes) = mpsc::unbounded_channel();
-        let (dir, mut shown) = (current.to_path_buf(), palette);
-        tokio::spawn(async move {
-            // Ends when the watch, and with it `touched`, is dropped.
-            while touched.recv().await.is_some() {
-                tokio::time::sleep(SETTLE).await;
-                while touched.try_recv().is_ok() {}
-                let now = resolve(&dir);
-                if now != shown {
-                    shown = now;
-                    if tx.send(now).is_err() {
-                        break;
-                    }
-                }
-            }
-        });
+        tokio::spawn(repaint(touched, current.to_path_buf(), palette, tx));
         Follow {
             palette,
             changes,
