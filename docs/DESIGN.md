@@ -64,6 +64,7 @@ crossterm = { version = "0.29", features = ["event-stream"], optional = true }
 tokio     = { version = "1", features = ["rt-multi-thread","macros","time","sync","fs","io-util"], optional = true }
 futures   = { version = "0.3", optional = true }
 anyhow    = { version = "1", optional = true }
+notify    = { version = "8", optional = true }   # the Omarchy theme is followed by notification, never polled
 # native also flips on ratatui/crossterm + rataflow/crossterm.
 
 # the library's own wasm need, under [target.'cfg(target_arch="wasm32")'.dependencies]
