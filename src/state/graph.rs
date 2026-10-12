@@ -80,6 +80,8 @@ fn content_matches(info: &AgentInfo, node: &AgentNode) -> bool {
     title_ok
         && node.description.as_deref() == info.description.as_deref()
         && node.said.as_deref() == info.said.as_ref().map(|s| s.excerpt.as_str())
+        && node.cwd == info.cwd
+        && node.branch == info.branch
         && node.status == info.status
         && node.tool_count == info.tool_calls.len()
         && node.last_tool.as_deref() == info.last_tool()
@@ -93,6 +95,8 @@ fn build_content(info: &AgentInfo) -> AgentNode {
         title: node_title(info),
         description: info.description.clone(),
         said: info.said.as_ref().map(|s| s.excerpt.clone()),
+        cwd: info.cwd.clone(),
+        branch: info.branch.clone(),
         status: info.status,
         tool_count: info.tool_calls.len(),
         last_tool: info.last_tool().map(str::to_string),
@@ -689,5 +693,53 @@ mod tests {
         assert!(sync(&mut flow, &model, false));
         assert!(flow.node("g").is_some() && flow.node("m").is_some());
         assert_eq!(model.agent_count(), 4);
+    }
+
+    #[test]
+    fn a_groups_place_follows_its_declarations_onto_the_card() {
+        use crate::fact::{Declaration, Fact, FactKind};
+        let t = |m: u32| {
+            chrono::DateTime::parse_from_rfc3339(&format!("2026-10-06T10:{m:02}:00Z"))
+                .ok()
+                .map(|d| d.with_timezone(&chrono::Utc))
+        };
+        let declare = |m, cwd: &str, title: &str| Fact {
+            agent: Some("g".into()),
+            ts: t(m),
+            kind: FactKind::Declared(Some(Declaration {
+                label: Some("conductor".into()),
+                description: Some(title.into()),
+                cwd: Some(cwd.into()),
+                branch: Some("main".into()),
+            })),
+        };
+        let mut model = model_with_subagent();
+        model.apply_fact(&Fact {
+            agent: Some("g".into()),
+            ts: t(0),
+            kind: FactKind::Agent {
+                kind: AgentKind::Group,
+                parent: Some("main".into()),
+                agent_type: None,
+                description: None,
+                spawned_by: None,
+                interactive: false,
+            },
+        });
+        model.apply_fact(&declare(1, "/a", "first"));
+        let mut flow = new_flow();
+        sync(&mut flow, &model, false);
+        let card = |flow: &mut AgentFlow| flow.node_content_mut("g").unwrap().clone();
+        let first = card(&mut flow);
+        assert_eq!(first.cwd.as_deref(), Some("/a"));
+        assert_eq!(first.branch.as_deref(), Some("main"));
+        assert_eq!(first.description.as_deref(), Some("first"));
+
+        // A later line changes the card in place.
+        model.apply_fact(&declare(2, "/b", "second"));
+        sync(&mut flow, &model, false);
+        let second = card(&mut flow);
+        assert_eq!(second.cwd.as_deref(), Some("/b"));
+        assert_eq!(second.description.as_deref(), Some("second"));
     }
 }

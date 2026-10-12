@@ -131,13 +131,27 @@ pub enum FactKind {
     Title(String),
     /// The agent (or group) is stated again by the orchestrator that runs it
     /// (a manifest line), which shows it again after a `Gone` before this time.
-    /// The label, when there is one, is the node's title, the latest declaration
-    /// naming it. Distinct from the agent's own records, which never revive it.
-    Declared(Option<String>),
+    /// A line that says more than that ([`Declaration`]) states the whole of
+    /// it: the latest such line is the node's, and what it leaves out is gone.
+    /// Distinct from the agent's own records, which never revive it.
+    Declared(Option<Declaration>),
     /// The agent (or group) is taken off the canvas, with everything under it,
     /// until it is stated again at a later time. Not a deletion: what it said
     /// stays folded.
     Gone,
+}
+
+/// What a manifest line says about a node besides that it exists.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Declaration {
+    /// The node's title: its `agent_type`.
+    pub label: Option<String>,
+    /// What it is for: its `description`.
+    pub description: Option<String>,
+    /// The folder it works in.
+    pub cwd: Option<String>,
+    /// Its git branch.
+    pub branch: Option<String>,
 }
 
 /// What one record stated, and when the record itself was written.

@@ -41,6 +41,9 @@ pub struct AgentNode {
     /// The agent's latest message, shown in the description's place while it
     /// works: its status update.
     pub said: Option<String>,
+    /// The folder and git branch the agent works in, shown under the title.
+    pub cwd: Option<String>,
+    pub branch: Option<String>,
     pub status: AgentStatus,
     /// Number of tool calls (for the `⚒ N tools` line).
     pub tool_count: usize,
@@ -52,7 +55,7 @@ pub struct AgentNode {
     pub interactive: bool,
 }
 
-use crate::ui::truncate;
+use crate::ui::{place_rows, truncate};
 
 /// Compact human token count, e.g. `1.2k`, `34`, `2.0M`.
 pub(crate) fn fmt_tokens(n: u64) -> String {
@@ -144,6 +147,12 @@ impl NodeContent for AgentNode {
         let mut lines: Vec<Line> = Vec::new();
         lines.push(title_line);
 
+        let place = place_rows(self.cwd.as_deref(), self.branch.as_deref(), inner_w);
+        let placed = !place.is_empty();
+        for row in place {
+            lines.push(Line::from(Span::styled(row, bg_style.fg(palette.subtle))));
+        }
+
         let saying = self
             .said
             .as_ref()
@@ -156,19 +165,22 @@ impl NodeContent for AgentNode {
             lines.push(Line::from(Span::styled(desc, bg_style.fg(palette.subtle))));
         }
 
-        // Tools row: "⚒ N · last_tool".
-        let tools_text = if let Some(last) = self.last_tool.as_ref() {
-            let prefix = format!("⚒ {} · ", self.tool_count);
-            let budget =
-                inner_w.saturating_sub(unicode_width::UnicodeWidthStr::width(prefix.as_str()));
-            format!("{prefix}{}", truncate(last, budget))
-        } else {
-            format!("⚒ {} tools", self.tool_count)
-        };
-        lines.push(Line::from(Span::styled(
-            tools_text,
-            bg_style.fg(palette.accent),
-        )));
+        // Tools row: "⚒ N · last_tool". A placed card has no tools to count
+        // (a group's room goes to its place), so the row yields to the footer.
+        if !placed || self.tool_count > 0 {
+            let tools_text = if let Some(last) = self.last_tool.as_ref() {
+                let prefix = format!("⚒ {} · ", self.tool_count);
+                let budget =
+                    inner_w.saturating_sub(unicode_width::UnicodeWidthStr::width(prefix.as_str()));
+                format!("{prefix}{}", truncate(last, budget))
+            } else {
+                format!("⚒ {} tools", self.tool_count)
+            };
+            lines.push(Line::from(Span::styled(
+                tools_text,
+                bg_style.fg(palette.accent),
+            )));
+        }
 
         // Footer row: status word + token count, separated to the edges.
         let tokens = fmt_tokens(self.output_tokens);
@@ -243,6 +255,69 @@ mod tests {
         assert_eq!(AgentStatus::Failed.glyph(), '✗');
     }
 
+    fn rows(buf: &Buffer, area: ratatui::layout::Rect) -> Vec<String> {
+        (0..area.height)
+            .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn card(node: AgentNode, area: ratatui::layout::Rect) -> Vec<String> {
+        use rataflow::Theme;
+        use rataflow::types::Position;
+
+        let ctx = NodeRenderContext {
+            id: "g",
+            area,
+            selected: false,
+            dragging: false,
+            position_absolute: Position::new(0.0, 0.0),
+            theme: Theme::default(),
+            animation_phase: 0,
+        };
+        let mut buf = Buffer::empty(area);
+        node.render(&ctx, &mut buf);
+        rows(&buf, area)
+    }
+
+    fn group_card() -> AgentNode {
+        AgentNode {
+            title: "conductor".into(),
+            description: Some("fix token refresh".into()),
+            said: None,
+            cwd: None,
+            branch: None,
+            status: AgentStatus::Running,
+            tool_count: 0,
+            last_tool: None,
+            output_tokens: 0,
+            interactive: false,
+        }
+    }
+
+    #[test]
+    fn a_group_card_shows_its_place_above_its_title() {
+        let area = ratatui::layout::Rect::new(0, 0, 30, 7);
+        let placed = AgentNode {
+            cwd: Some("/srv/app/zoetrope/web/frontend".into()),
+            branch: Some("main".into()),
+            ..group_card()
+        };
+        let text = card(placed, area);
+        // Under the label: the folder with its tail kept, the branch, the title,
+        // and still the status footer.
+        assert!(text[1].contains("conductor"), "{text:#?}");
+        assert!(text[2].contains("…app/zoetrope/web/frontend"), "{text:#?}");
+        assert!(text[3].contains("⎇ main"), "{text:#?}");
+        assert!(text[4].contains("fix token refresh"), "{text:#?}");
+        assert!(text[5].contains("running"), "{text:#?}");
+
+        // Without a place the card is what it was: description, tools, footer.
+        let text = card(group_card(), area);
+        assert!(text[2].contains("fix token refresh"), "{text:#?}");
+        assert!(text[3].contains("0 tools"), "{text:#?}");
+        assert!(text[4].contains("running"), "{text:#?}");
+    }
+
     fn render_into(area: ratatui::layout::Rect) -> Buffer {
         use rataflow::Theme;
         use rataflow::types::Position;
@@ -251,6 +326,8 @@ mod tests {
             title: "claude".into(),
             description: None,
             said: None,
+            cwd: None,
+            branch: None,
             status: AgentStatus::Done,
             tool_count: 3,
             last_tool: Some("Bash".into()),

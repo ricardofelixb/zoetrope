@@ -20,14 +20,26 @@
 //! One manifest can hold several armies, each drawn as its own tree: a
 //! `group` line is a node under the job's root, and a member line naming it as
 //! its `parent` hangs its root under the group instead (a member naming a group
-//! whose line is not read yet still hangs under it). A `gone` line takes a group
-//! or member off the canvas and out of the counts, with everything under it, and
-//! a later `group` or member line for the same key shows it again, whichever
-//! order they are read in.
+//! whose line is not read yet still hangs under it). A `parent` may also name
+//! another member, which hangs this member's root under that member's root
+//! card (its first session, when the key has run more than once), in whichever
+//! order their lines are read; the session that would close a loop (a parent that
+//! hangs under the member) hangs under the job's root instead. A `gone` line takes a group or member off the
+//! canvas and out of the counts, with everything under it, and a later `group`
+//! or member line for the same key shows it again, whichever order they are
+//! read in.
+//!
+//! A group says where its army works, in optional fields its card and panel
+//! show: `cwd` (the conductor's folder, absolute), `branch` (its git branch) and
+//! `title` (its session's name, or else its first prompt). A later `group` line
+//! for the same key replaces the earlier one's fields as a whole: a field it
+//! leaves out is gone, so a writer carries every field it knows forward. A line
+//! without them draws the group as before.
 //!
 //! ```text
-//! {"group":"conductor-1","label":"Claude (conductor)","ts":"…"}
+//! {"group":"conductor-1","label":"Claude (conductor)","cwd":"/home/me/zoetrope/web","branch":"main","title":"fix token refresh on resume","ts":"…"}
 //! {"member":"plan","parent":"conductor-1","label":"plan: Opus (claude)","session":"6f1c2a9e-…","ts":"…"}
+//! {"member":"explore","parent":"plan","label":"explore: Haiku (claude)","session":"0b7d3c41-…","ts":"…"}
 //! {"gone":"conductor-1","ts":"…"}
 //! ```
 //!
@@ -47,13 +59,17 @@
 //! the one translation a shared tree needs, [`Member::rewrite`]: every member
 //! calls its own root `"main"`, so a member's ids are renamed into its own
 //! namespace and its root is hung under the job's (which is not drawn).
+//!
+//! A group's label, title, folder and branch travel as one [`Declaration`]: the
+//! label and title are the node's `agent_type` and `description`, as for any
+//! agent, and the folder and branch are its only new fields.
 
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::fact::{AgentId, AgentKind, Fact, FactKind, Statement};
+use crate::fact::{AgentId, AgentKind, Declaration, Fact, FactKind, Statement};
 use crate::provider::Provider;
 use crate::state::session::MAIN_ID;
 
@@ -106,7 +122,8 @@ pub struct Entry {
     /// What the member was asked to do.
     #[serde(default)]
     pub task: Option<String>,
-    /// The group the member's root hangs under; the job's root when absent.
+    /// The group or member the member's root hangs under; the job's root when
+    /// absent.
     #[serde(default)]
     pub parent: Option<String>,
     #[serde(default)]
@@ -145,11 +162,20 @@ pub struct Told {
 }
 
 /// A group line: a node under the job's root that members hang under.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Group {
     pub group: String,
     #[serde(default)]
     pub label: Option<String>,
+    /// The folder the conductor works in.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Its git branch.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Its session's name, or else its first prompt.
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub ts: Option<DateTime<Utc>>,
 }
@@ -272,13 +298,13 @@ pub fn header_statements(header: &Header, manifest: &Path) -> Vec<Statement> {
     ]
 }
 
-/// A node stated by its manifest line at `ts`, with its title if the line has
-/// one: what shows it again after a `gone` before then.
-fn declaration(root: &str, ts: Option<DateTime<Utc>>, title: Option<String>) -> Fact {
+/// A node stated by its manifest line at `ts`, with what the line says of it:
+/// what shows it again after a `gone` before then.
+fn declaration(root: &str, ts: Option<DateTime<Utc>>, stated: Option<Declaration>) -> Fact {
     Fact {
         agent: Some(root.into()),
         ts,
-        kind: FactKind::Declared(title),
+        kind: FactKind::Declared(stated),
     }
 }
 
@@ -288,7 +314,8 @@ pub fn redeclared(root: &str, ts: Option<DateTime<Utc>>) -> Statement {
 }
 
 /// What a group line states: the group under the job's root, titled by its
-/// label (its key when there is none).
+/// label (its key when there is none), described by its title, and placed by
+/// its folder and branch.
 pub fn group_statement(group: &Group) -> Statement {
     let fact = |kind| Fact {
         agent: Some(group.group.clone()),
@@ -309,7 +336,12 @@ pub fn group_statement(group: &Group) -> Statement {
             declaration(
                 &group.group,
                 group.ts,
-                Some(group.label.clone().unwrap_or_else(|| group.group.clone())),
+                Some(Declaration {
+                    label: Some(group.label.clone().unwrap_or_else(|| group.group.clone())),
+                    description: group.title.clone(),
+                    cwd: group.cwd.clone(),
+                    branch: group.branch.clone(),
+                }),
             ),
         ],
     }
@@ -887,6 +919,49 @@ mod tests {
         assert_eq!(rewritten.facts[0].kind, birth.facts[0].kind);
     }
 
+    /// The births of the lines, as the statements a job's tree is folded from.
+    fn births(lines: &[&str]) -> Vec<Vec<Fact>> {
+        lines
+            .iter()
+            .map(|line| match parse_line(line) {
+                Some(Line::Group(group)) => group_statement(&group).facts,
+                Some(Line::Member(e)) => Member::new(e.member.clone(), &e).birth().facts,
+                other => panic!("expected a group or a member, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_member_hangs_under_another_member_in_any_read_order() {
+        let statements = births(&[
+            r#"{"group":"c-1","label":"conductor","ts":"2026-10-06T10:00:00Z"}"#,
+            r#"{"member":"plan","parent":"c-1","session":"s","ts":"2026-10-06T10:01:00Z"}"#,
+            r#"{"member":"probe","parent":"plan","session":"t","ts":"2026-10-06T10:02:00Z"}"#,
+            r#"{"member":"top","session":"u","ts":"2026-10-06T10:03:00Z"}"#,
+            r#"{"member":"deep","parent":"top","session":"v","ts":"2026-10-06T10:04:00Z"}"#,
+        ]);
+        let mut orders = vec![(0..statements.len()).collect::<Vec<_>>()];
+        orders.push(orders[0].iter().rev().copied().collect());
+        // A child before its parent, a parent before its group.
+        orders.push(vec![2, 4, 1, 3, 0]);
+        orders.push(vec![4, 2, 3, 1, 0]);
+        orders.push(vec![1, 3, 2, 4, 0]);
+        for order in orders {
+            let facts: Vec<&Fact> = order.iter().flat_map(|&i| &statements[i]).collect();
+            let model = fold(&facts);
+            let parent = |id: &str| model.agent(id).unwrap().parent.clone();
+            assert_eq!(parent("c-1").as_deref(), Some(MAIN_ID), "{order:?}");
+            assert_eq!(parent("plan").as_deref(), Some("c-1"), "{order:?}");
+            assert_eq!(parent("probe").as_deref(), Some("plan"), "{order:?}");
+            assert_eq!(parent("top").as_deref(), Some(MAIN_ID), "{order:?}");
+            assert_eq!(parent("deep").as_deref(), Some("top"), "{order:?}");
+            for member in ["plan", "probe", "top", "deep"] {
+                assert_eq!(model.agent(member).unwrap().kind, AgentKind::Subagent);
+            }
+            assert_eq!(model.agent_count(), 6, "no placeholder is left: {order:?}");
+        }
+    }
+
     #[test]
     fn gone_hides_a_group_with_its_members_until_stated_again() {
         let Some(Line::Gone(gone)) = parse_line(r#"{"gone":"c-1","ts":"2026-10-06T10:05:00Z"}"#)
@@ -897,8 +972,8 @@ mod tests {
         let group = |minute| {
             group_statement(&Group {
                 group: "c-1".into(),
-                label: None,
                 ts: at(minute),
+                ..Group::default()
             })
             .facts
         };
@@ -931,6 +1006,7 @@ mod tests {
                 group: "c".into(),
                 label: Some(label.into()),
                 ts: at(minute),
+                ..Group::default()
             })
             .facts
         };
@@ -941,6 +1017,59 @@ mod tests {
             assert_eq!(
                 model.agent("c").unwrap().agent_type.as_deref(),
                 Some("new title")
+            );
+        }
+    }
+
+    fn group_line(line: &str) -> Vec<Fact> {
+        let Some(Line::Group(group)) = parse_line(line) else {
+            panic!("expected a group: {line}");
+        };
+        group_statement(&group).facts
+    }
+
+    #[test]
+    fn a_group_says_where_it_works() {
+        let facts = group_line(
+            r#"{"group":"c","label":"conductor","cwd":"/home/me/zoetrope/web","branch":"main","title":"fix token refresh","ts":"2026-10-06T10:01:00Z"}"#,
+        );
+        let model = fold(&facts.iter().collect::<Vec<_>>());
+        let group = model.agent("c").unwrap();
+        assert_eq!(group.agent_type.as_deref(), Some("conductor"));
+        assert_eq!(group.cwd.as_deref(), Some("/home/me/zoetrope/web"));
+        assert_eq!(group.branch.as_deref(), Some("main"));
+        assert_eq!(group.description.as_deref(), Some("fix token refresh"));
+
+        // A line from before the fields existed states none of them.
+        let facts = group_line(r#"{"group":"c","label":"conductor","ts":"2026-10-06T10:01:00Z"}"#);
+        let model = fold(&facts.iter().collect::<Vec<_>>());
+        let group = model.agent("c").unwrap();
+        assert_eq!(group.agent_type.as_deref(), Some("conductor"));
+        assert_eq!(
+            (&group.cwd, &group.branch, &group.description),
+            (&None, &None, &None)
+        );
+    }
+
+    #[test]
+    fn the_latest_group_line_replaces_its_fields_in_any_order() {
+        let old = group_line(
+            r#"{"group":"c","cwd":"/old","branch":"dev","title":"old","ts":"2026-10-06T10:01:00Z"}"#,
+        );
+        // A field a later line leaves out is gone: a conductor can lose its branch.
+        let new =
+            group_line(r#"{"group":"c","cwd":"/new","title":"new","ts":"2026-10-06T10:02:00Z"}"#);
+        for order in [[&old, &new], [&new, &old]] {
+            let facts: Vec<&Fact> = order.iter().flat_map(|f| f.iter()).collect();
+            let model = fold(&facts);
+            let group = model.agent("c").unwrap();
+            assert_eq!(group.cwd.as_deref(), Some("/new"));
+            assert_eq!(group.branch, None);
+            assert_eq!(group.description.as_deref(), Some("new"));
+            assert_eq!(
+                group.agent_type.as_deref(),
+                Some("c"),
+                "its key without a label"
             );
         }
     }

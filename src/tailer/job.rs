@@ -48,6 +48,8 @@ pub(crate) struct JobFeed {
     events: HashMap<String, Vec<Event>>,
     /// How many sessions each key has, so a second one becomes `key~2`.
     per_key: HashMap<String, usize>,
+    /// The parent each root in the tree hangs under, so no session closes a loop.
+    parents: HashMap<String, String>,
     ticks: u32,
 }
 
@@ -62,6 +64,7 @@ impl JobFeed {
             claimed: HashMap::new(),
             events: HashMap::new(),
             per_key: HashMap::new(),
+            parents: HashMap::new(),
             ticks: 0,
         }
     }
@@ -156,7 +159,15 @@ impl JobFeed {
         }
         let count = self.per_key.entry(entry.member.clone()).or_default();
         *count += 1;
-        let member = Member::new(root(&entry.member, *count), entry);
+        let id = root(&entry.member, *count);
+        let mut entry = entry.clone();
+        if self.closes_a_loop(&id, entry.parent.as_deref()) {
+            entry.parent = None;
+        }
+        if let Some(parent) = &entry.parent {
+            self.parents.insert(id.clone(), parent.clone());
+        }
+        let member = Member::new(id, &entry);
         self.claimed.insert(key, member.root.clone());
         out.push(member.birth());
         out.push(member.session(session.provider, &session.id));
@@ -183,6 +194,18 @@ impl JobFeed {
         for n in 1..=self.count(key) {
             out.push(job::redeclared(&root(key, n), entry.ts));
         }
+    }
+
+    /// Whether `id` hanging under `parent` would close a loop: `parent` is
+    /// `id`, or hangs under it.
+    fn closes_a_loop<'a>(&'a self, id: &str, mut parent: Option<&'a str>) -> bool {
+        while let Some(at) = parent {
+            if at == id {
+                return true;
+            }
+            parent = self.parents.get(at).map(String::as_str);
+        }
+        false
     }
 
     /// How many sessions have joined under `key`.
@@ -635,6 +658,66 @@ mod tests {
         assert!(!revived.hidden("m") && !revived.hidden("m~2"));
         let last = until(16);
         assert!(last.hidden("m") && last.hidden("m~2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A member cannot hang under itself, directly or through the members
+    /// under it: the line that would close the loop hangs under the job's root.
+    #[test]
+    fn a_member_never_hangs_under_itself() {
+        let dir = temp_dir("cycle");
+        let manifest = dir.join("cycle.jsonl");
+        append(&manifest, r#"{"zoe":"job","v":1,"id":"j"}"#);
+        for (key, parent, session) in [
+            ("a", "b", "11111111-1111-1111-1111-111111111111"),
+            ("b", "c", "22222222-2222-2222-2222-222222222222"),
+            ("c", "a", "33333333-3333-3333-3333-333333333333"),
+            ("d", "d", "44444444-4444-4444-4444-444444444444"),
+        ] {
+            append(&dir.join(format!("{session}.jsonl")), &claude_line(key, 1));
+            append(
+                &manifest,
+                &format!(r#"{{"member":"{key}","parent":"{parent}","path":"{session}.jsonl"}}"#),
+            );
+        }
+        let model = fold(&read_job(&manifest));
+        let parent = |id: &str| model.agent(id).unwrap().parent.clone();
+        assert_eq!(parent("a").as_deref(), Some("b"));
+        assert_eq!(parent("b").as_deref(), Some("c"));
+        assert_eq!(parent("c").as_deref(), Some(MAIN_ID), "closes the loop");
+        assert_eq!(parent("d").as_deref(), Some(MAIN_ID), "its own parent");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A line naming a session that is in the tree already changes nothing,
+    /// the parent it names included: it cannot be used to forget a hanging
+    /// that a later line would then close into a loop.
+    #[test]
+    fn a_repeated_line_does_not_make_room_for_a_loop() {
+        let dir = temp_dir("repeat");
+        let manifest = dir.join("repeat.jsonl");
+        append(&manifest, r#"{"zoe":"job","v":1,"id":"j"}"#);
+        let (a, b) = (
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        for session in [a, b] {
+            append(
+                &dir.join(format!("{session}.jsonl")),
+                &claude_line(session, 1),
+            );
+        }
+        for line in [
+            format!(r#"{{"member":"a","parent":"b","path":"{a}.jsonl"}}"#),
+            format!(r#"{{"member":"a","path":"{a}.jsonl"}}"#),
+            format!(r#"{{"member":"b","parent":"a","path":"{b}.jsonl"}}"#),
+        ] {
+            append(&manifest, &line);
+        }
+        let model = fold(&read_job(&manifest));
+        let parent = |id: &str| model.agent(id).unwrap().parent.clone();
+        assert_eq!(parent("a").as_deref(), Some("b"), "the first line stands");
+        assert_eq!(parent("b").as_deref(), Some(MAIN_ID), "closes the loop");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
