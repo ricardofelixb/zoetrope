@@ -270,6 +270,9 @@ green = "#66800B"
             "background = \"#101315\"",
             "background = \"#101315\"\nforeground = \"cacccc\"",
             "background = \"rgba(1,2,3,4)\"\nforeground = \"#cacccc\"",
+            // A file cut short mid-write: the value never closes.
+            "background = \"#101315\"\nforeground = \"#cacccc",
+            "background = \"#101315\nforeground = \"#cacccc\"",
         ] {
             assert_eq!(palette_from(colors), None, "{colors:?}");
         }
@@ -298,6 +301,42 @@ green = "#66800B"
             Follow::at(&current.join("missing")).palette,
             base_palette(false)
         );
+        let _ = std::fs::remove_dir_all(&current);
+    }
+
+    /// The next palette, or a failure if the theme does not change in a moment.
+    async fn heard(follow: &mut Follow) -> Option<Palette> {
+        tokio::time::timeout(Duration::from_secs(5), follow.changed())
+            .await
+            .expect("the theme change was not heard")
+    }
+
+    /// A file replaced inside `theme/`, in place or by a rename, leaves `theme/`
+    /// itself alone, and so does one replaced in a `theme/` that a theme set
+    /// has just put there.
+    #[tokio::test]
+    async fn a_file_replaced_inside_the_theme_folder_repaints() {
+        let current = temp_current("file");
+        theme_dir(&current, SOLITUDE);
+        let mut follow = Follow::at(&current);
+        let theme = current.join("theme");
+
+        std::fs::write(theme.join("colors.toml"), FLEXOKI_LIGHT).unwrap();
+        assert_eq!(heard(&mut follow).await, palette_from(FLEXOKI_LIGHT));
+
+        std::fs::write(theme.join("colors.tmp"), SOLITUDE).unwrap();
+        std::fs::rename(theme.join("colors.tmp"), theme.join("colors.toml")).unwrap();
+        assert_eq!(heard(&mut follow).await, palette_from(SOLITUDE));
+
+        let next = current.join("next-theme");
+        std::fs::create_dir_all(&next).unwrap();
+        std::fs::write(next.join("colors.toml"), FLEXOKI_LIGHT).unwrap();
+        std::fs::remove_dir_all(&theme).unwrap();
+        std::fs::rename(&next, &theme).unwrap();
+        assert_eq!(heard(&mut follow).await, palette_from(FLEXOKI_LIGHT));
+
+        std::fs::write(theme.join("colors.toml"), SOLITUDE).unwrap();
+        assert_eq!(heard(&mut follow).await, palette_from(SOLITUDE));
         let _ = std::fs::remove_dir_all(&current);
     }
 
