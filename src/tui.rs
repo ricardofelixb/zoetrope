@@ -45,7 +45,14 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     // A paste arrives whole, as one event, so it lands in a message being written.
-    execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
+    // The title names the pane `zoe`, which is how a terminal client that cannot
+    // see the mouse mode (ovis) knows to hand it drags rather than select text.
+    execute!(
+        stdout(),
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        crossterm::terminal::SetTitle("zoe")
+    )?;
     install_panic_hook();
 
     // Crossterm event reader → unbounded channel (input must never block the

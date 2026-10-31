@@ -6,12 +6,14 @@
 //! (node/edge added) marks layout dirty; at sync end we run Sugiyama. Selection
 //! survives because node ids are stable and we never clear-and-re-add.
 
+use std::collections::{HashMap, HashSet};
+
 use rataflow::{Edge, Flow, Handle, HandlePosition, Node, Palette, Reconnectable, Sugiyama, Theme};
 use ratatui::style::Color;
 
 use super::session::{AgentInfo, AgentKind, AgentStatus, SessionModel};
 use crate::ui::edges::AgentEdge;
-use crate::ui::nodes::{AgentNode, MAIN_NODE_DIMS, SUB_NODE_DIMS};
+use crate::ui::nodes::{AgentNode, Folded, MAIN_NODE_DIMS, SUB_NODE_DIMS};
 
 /// The concrete `Flow` type zoetrope uses: agent-card nodes, step-routed parent
 /// edges (no labels — liveness reads from color alone).
@@ -113,6 +115,7 @@ fn build_content(info: &AgentInfo) -> AgentNode {
         last_tool: info.last_tool().map(str::to_string),
         output_tokens: info.output_tokens,
         interactive: info.is_interactive(),
+        folded: Folded::default(),
     }
 }
 
@@ -138,15 +141,39 @@ const LOCAL_V_GAP: f64 = 5.0;
 /// Agents the model hides (and what hangs under them) are left off the canvas,
 /// and taken off it if they were there. So is a job's root, with no edge from
 /// it: what hung under it is the root of its own tree. Returns `true` if structure changed.
+#[cfg(test)]
 pub fn sync(flow: &mut AgentFlow, model: &SessionModel, relayout: bool) -> bool {
+    sync_folding(flow, model, &HashSet::new(), relayout)
+}
+
+/// [`sync`], with the `folded` agents (see [`SessionModel::folded`]) left off
+/// the canvas too and counted on their parent's card.
+pub fn sync_folding(
+    flow: &mut AgentFlow,
+    model: &SessionModel,
+    folded: &HashSet<String>,
+    relayout: bool,
+) -> bool {
     let mut structural = false;
     let empty = flow.nodes().next().is_none();
 
-    let hidden: std::collections::HashSet<&String> = model
+    let hidden: HashSet<&String> = model
         .spawn_order
         .iter()
-        .filter(|id| model.undrawn(id))
+        .filter(|id| folded.contains(*id) || model.undrawn(id))
         .collect();
+    let mut holds: HashMap<&str, Folded> = HashMap::new();
+    for id in folded {
+        let Some(info) = model.agent(id) else {
+            continue;
+        };
+        let Some(parent) = info.parent.as_deref().filter(|p| !folded.contains(*p)) else {
+            continue;
+        };
+        let held = holds.entry(parent).or_default();
+        held.total += 1;
+        held.failed += usize::from(info.status != AgentStatus::Done);
+    }
     let drawn: Vec<String> = hidden
         .iter()
         .filter(|id| flow.node(id).is_some())
@@ -163,42 +190,41 @@ pub fn sync(flow: &mut AgentFlow, model: &SessionModel, relayout: bool) -> bool 
         if hidden.contains(id) {
             continue;
         }
+        let held = holds.get(id.as_str()).copied().unwrap_or_default();
         if let Some(existing) = flow.node_content_mut(id) {
             // Steady state: only rebuild (String clones) when something
             // visible changed — the per-second status tick and per-batch
             // syncs walk every agent, and most are unchanged.
-            if !content_matches(info, existing) {
+            if !content_matches(info, existing) || existing.folded != held {
                 *existing = build_content(info);
+                existing.folded = held;
             }
         } else {
-            // Sibling index for local placement — computed only for the rare
-            // new node; the no-new-nodes steady state skips it entirely.
-            let siblings = info
-                .parent
-                .as_deref()
-                .map(|p| {
-                    model
-                        .spawn_order
-                        .iter()
-                        .take_while(|x| *x != id)
-                        .filter(|x| model.agent(x).and_then(|a| a.parent.as_deref()) == Some(p))
-                        .count()
-                })
-                .unwrap_or(0);
-            let content = build_content(info);
+            let content = AgentNode {
+                folded: held,
+                ..build_content(info)
+            };
             let (w, h) = node_dims(info.kind);
-            // Local placement: below the parent, fanned past prior siblings.
-            // Overwritten by Sugiyama when `relayout` runs; kept verbatim in
-            // Manual so existing nodes never move underneath the user.
+            // Local placement: below the parent, past the siblings on the
+            // canvas (a folded one leaves no gap). Overwritten by Sugiyama
+            // when `relayout` runs; kept verbatim in Manual so existing nodes
+            // never move underneath the user.
             let pos = info
                 .parent
                 .as_deref()
                 .and_then(|p| flow.node(p))
                 .map(|parent| {
-                    (
-                        parent.position.x + siblings as f64 * (w + LOCAL_H_GAP),
-                        parent.position.y + parent.height + LOCAL_V_GAP,
-                    )
+                    let x = model
+                        .spawn_order
+                        .iter()
+                        .filter(|x| {
+                            model.agent(x).and_then(|a| a.parent.as_deref())
+                                == Some(parent.id.as_str())
+                        })
+                        .filter_map(|x| flow.node(x))
+                        .map(|n| n.position.x + n.width + LOCAL_H_GAP)
+                        .fold(parent.position.x, f64::max);
+                    (x, parent.position.y + parent.height + LOCAL_V_GAP)
                 })
                 .unwrap_or_else(|| {
                     // A tree's root: past the trees already there.

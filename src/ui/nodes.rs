@@ -53,6 +53,16 @@ pub struct AgentNode {
     /// Interactive agents (main, forks) word `Running` as "active": we know
     /// there are recent entries, not that a task is executing.
     pub interactive: bool,
+    /// Its finished subagents folded into this card (`e` unfolds them).
+    pub folded: Folded,
+}
+
+/// How many finished subagents a card holds folded, and how many of those did
+/// not succeed (failed or stopped).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Folded {
+    pub total: usize,
+    pub failed: usize,
 }
 
 use crate::ui::{place_rows, truncate};
@@ -182,9 +192,25 @@ impl NodeContent for AgentNode {
             )));
         }
 
-        // Footer row: status word + token count, separated to the edges.
+        // Footer row: status word + token count, separated to the edges. A card
+        // holding folded subagents counts them there instead.
         let tokens = fmt_tokens(self.output_tokens);
-        let footer = if self.output_tokens > 0 {
+        let footer = if self.folded.total > 0 {
+            let mut spans = vec![
+                Span::styled(status_text, bg_style.fg(glyph_color)),
+                Span::styled(
+                    format!("  +{} done", self.folded.total),
+                    bg_style.fg(palette.muted),
+                ),
+            ];
+            if self.folded.failed > 0 {
+                spans.push(Span::styled(
+                    format!(" {}✗", self.folded.failed),
+                    bg_style.fg(palette.error),
+                ));
+            }
+            Line::from(spans)
+        } else if self.output_tokens > 0 {
             Line::from(vec![
                 Span::styled(status_text, bg_style.fg(glyph_color)),
                 Span::styled(format!("  {tokens} tok"), bg_style.fg(palette.muted)),
@@ -291,6 +317,7 @@ mod tests {
             last_tool: None,
             output_tokens: 0,
             interactive: false,
+            folded: Default::default(),
         }
     }
 
@@ -333,6 +360,7 @@ mod tests {
             last_tool: Some("Bash".into()),
             output_tokens: 1200,
             interactive: false,
+            folded: Default::default(),
         };
         let ctx = NodeRenderContext {
             id: "main",

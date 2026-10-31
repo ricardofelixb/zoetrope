@@ -21,6 +21,10 @@ pub const MAIN_ID: &str = "main";
 /// this is minutes, not the main agent's seconds-scale file-growth window.
 const INTERACTIVE_IDLE_SECS: i64 = 120;
 
+/// How long a subagent stays on the canvas once it has finished, before it
+/// folds into its parent's card (see [`SessionModel::folded`]).
+pub const FOLD_AFTER_SECS: i64 = 60;
+
 /// The full derived view of a session.
 ///
 /// `Clone` is O(1): every growing collection here is persistent
@@ -560,6 +564,53 @@ impl SessionModel {
     /// are drawn as the roots of their own trees.
     pub fn undrawn(&self, id: &str) -> bool {
         (id == MAIN_ID && crate::job::is_job_id(&self.session_id)) || self.hidden(id)
+    }
+
+    /// Subagents folded into their parent's card: finished (done, failed or
+    /// stopped) for [`FOLD_AFTER_SECS`] by `now` (the timeline's reference,
+    /// else the latest activity), with all they spawned folded too. `keep`
+    /// and what it hangs under stay, so a selected card never vanishes.
+    pub fn folded(
+        &self,
+        now: Option<DateTime<Utc>>,
+        keep: Option<&str>,
+    ) -> std::collections::HashSet<String> {
+        let Some(reference) = now.or(self.last_activity) else {
+            return Default::default();
+        };
+        let foldable = |a: &AgentInfo| {
+            a.kind == AgentKind::Subagent
+                && a.parent.is_some()
+                && matches!(
+                    a.status,
+                    AgentStatus::Done | AgentStatus::Failed | AgentStatus::Stopped
+                )
+                && a.last_ts
+                    .is_some_and(|ts| (reference - ts).num_seconds() >= FOLD_AFTER_SECS)
+        };
+        // What stays, and so everything above it: a folded card's whole
+        // subtree goes with it.
+        let mut kept = std::collections::HashSet::new();
+        let stays = self
+            .agents
+            .iter()
+            .filter(|(id, a)| !foldable(a) && !self.undrawn(id))
+            .map(|(id, _)| id.as_str())
+            .chain(keep);
+        for id in stays {
+            let mut at = Some(id);
+            while let Some(a) = at {
+                if !kept.insert(a) {
+                    break;
+                }
+                at = self.agents.get(a).and_then(|a| a.parent.as_deref());
+            }
+        }
+        self.agents
+            .iter()
+            .filter(|(id, a)| foldable(a) && !kept.contains(id.as_str()))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Whether `id`, or anything it hangs under, was taken off the canvas: its
@@ -2428,6 +2479,44 @@ mod tests {
         m.agents.get_mut("c2").unwrap().status = AgentStatus::Failed;
         m.recompute_group_status();
         assert_eq!(m.agent("wf-1").unwrap().status, AgentStatus::Failed);
+    }
+
+    #[test]
+    fn finished_subagents_fold_unless_something_under_them_still_shows() {
+        let mut m = SessionModel::new("s1".into());
+        let meta = SubagentMeta {
+            agent_type: Some("guide".into()),
+            description: None,
+            tool_use_id: None,
+            stopped_by_user: None,
+        };
+        for id in ["old", "fresh", "lead", "helper"] {
+            m.apply_meta(id, None, &meta);
+        }
+        m.agents.get_mut("helper").unwrap().parent = Some("lead".into());
+        let now = Utc::now();
+        let set = |m: &mut SessionModel, id: &str, status, ago| {
+            let a = m.agents.get_mut(id).unwrap();
+            a.status = status;
+            a.last_ts = Some(now - chrono::Duration::seconds(ago));
+        };
+        set(&mut m, "old", AgentStatus::Done, FOLD_AFTER_SECS);
+        set(&mut m, "fresh", AgentStatus::Done, FOLD_AFTER_SECS - 1);
+        set(&mut m, "lead", AgentStatus::Failed, 600);
+        set(&mut m, "helper", AgentStatus::Running, 600);
+        let folded = |m: &SessionModel, keep| {
+            let mut ids: Vec<_> = m.folded(Some(now), keep).into_iter().collect();
+            ids.sort();
+            ids
+        };
+
+        // A running helper keeps the long-failed lead it hangs under.
+        assert_eq!(folded(&m, None), ["old"]);
+        // Once it finishes, the lead folds with it.
+        set(&mut m, "helper", AgentStatus::Done, 600);
+        assert_eq!(folded(&m, None), ["helper", "lead", "old"]);
+        // The selected card stays, and so does what it hangs under.
+        assert_eq!(folded(&m, Some("helper")), ["old"]);
     }
 
     #[test]

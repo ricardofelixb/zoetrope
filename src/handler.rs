@@ -165,6 +165,14 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> bool {
             return false;
         }
 
+        // A subagent finished a minute ago folds into its parent's card (`+N
+        // done`), so a long session stays as wide as what still runs. `e`
+        // shows them all, or folds them back.
+        KeyCode::Char('e') | KeyCode::Char('E') => {
+            app.toggle_finished();
+            return false;
+        }
+
         // Timeline scrubbing (DVR). `[`/`]` step the playhead to the prev/next
         // prompt-era boundary; `End`/`g`/`G` re-pin to the live/replay edge (`g`
         // is the letter alias, vim-style "go to end", that also works in the
@@ -539,6 +547,7 @@ mod tests {
                     last_tool: None,
                     output_tokens: 0,
                     interactive: false,
+                    folded: Default::default(),
                 },
             )
         };
@@ -595,6 +604,7 @@ mod tests {
                 last_tool: None,
                 output_tokens: 0,
                 interactive: false,
+                folded: Default::default(),
             },
         );
         app.flow.add_node(node).unwrap();
@@ -629,6 +639,7 @@ mod tests {
                 last_tool: None,
                 output_tokens: 0,
                 interactive: false,
+                folded: Default::default(),
             },
         );
         app.flow.add_node(node).unwrap();
@@ -854,6 +865,7 @@ mod tests {
             last_tool: None,
             output_tokens: 0,
             interactive: false,
+            folded: Default::default(),
         };
         let node = rataflow::Node::new(
             crate::state::session::MAIN_ID,
@@ -903,6 +915,7 @@ mod tests {
                 last_tool: None,
                 output_tokens: 0,
                 interactive: false,
+                folded: Default::default(),
             },
         );
         app.flow.add_node(node).unwrap();
