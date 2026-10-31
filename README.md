@@ -192,6 +192,7 @@ bar to seek · `?` for everything else.
 | mouse drag | seek along the scrubber |
 | `o` / `f` | camera: Overview / Follow |
 | `r` | relayout (tidy the graph) |
+| `e` | show finished subagents, or fold them back into their parent's card (`+N done`) |
 | arrows / `Tab` / `Shift-Tab` | move between agents |
 | `h` `j` `k` `l` | pan the graph |
 | `+` / `-` / `0` | zoom in / out / reset |

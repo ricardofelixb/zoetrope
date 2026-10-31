@@ -694,7 +694,7 @@ fn render_help(frame: &mut Frame, area: Rect, palette: &rataflow::Palette) {
         ]),
         Line::from(vec![
             Span::styled(" layout    ", key),
-            Span::styled("r rearrange the graph", txt),
+            Span::styled("r rearrange · e show/fold finished agents", txt),
         ]),
         Line::from(vec![
             Span::styled(" navigate  ", key),

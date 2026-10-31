@@ -271,6 +271,11 @@ pub struct App {
     /// Whether the detail panel unfolds what it folds (`x`): long prompts, long
     /// reports, and in the activity view task updates and runs of tool calls.
     pub whole_prompts: bool,
+    /// Whether finished subagents keep their cards (`e`) instead of folding
+    /// into their parent's.
+    pub show_finished: bool,
+    /// The agents folded off the canvas at the last sync.
+    folded: std::collections::HashSet<String>,
     /// The command a message for an agent is sent with (`--on-send`): words
     /// split on whitespace, then `{text}` filled in with the message, and
     /// `{provider}`, `{session}` and `{cwd}` with the agent's session
@@ -394,6 +399,8 @@ impl App {
             pending_seek: None,
             snapshots: Vec::new(),
             whole_prompts: false,
+            show_finished: false,
+            folded: Default::default(),
             on_send: None,
             draft: None,
             on_root: None,
@@ -921,15 +928,19 @@ impl App {
         // scrubbed back (so the as-of-then state shows, no wall-clock bleed).
         let now = self.timeline.now_reference();
         self.session.recompute_liveness(now);
+        let refolded = self.refold();
         // Layout is user-driven: a Sugiyama pass on every new node reflows the
         // whole graph and reads as "jumpy" as a session grows. So sync NEVER
         // auto-relayouts — new nodes keep their local placement (below parent,
         // fanned past siblings) and nothing existing moves until the user asks
         // to tidy (`r`, or re-engaging the camera with `o`/`f`). `layout_dirty`
         // tracks that there is un-applied growth for the on-demand path.
-        let structural = graph::sync(&mut self.flow, &self.session, false);
+        let structural = graph::sync_folding(&mut self.flow, &self.session, &self.folded, false);
         if structural {
             self.layout_dirty = true;
+        }
+        if refolded {
+            self.tidy_folds();
         }
         // A kept camera and selection, once there are cards to show. The camera
         // stays where it was kept, so the selection is not centered then.
@@ -948,6 +959,41 @@ impl App {
             }
         }
         structural
+    }
+
+    /// Work out which agents fold (none while `show_finished`), keeping the
+    /// selected one. Returns whether that changed.
+    fn refold(&mut self) -> bool {
+        let folded = if self.show_finished {
+            Default::default()
+        } else {
+            let keep = self
+                .selected_agent_id()
+                .or_else(|| self.pending_select.clone());
+            self.session
+                .folded(self.timeline.now_reference(), keep.as_deref())
+        };
+        let changed = folded != self.folded;
+        self.folded = folded;
+        changed
+    }
+
+    /// Close the gaps folded cards left, or open room for unfolded ones: at
+    /// once unless the user arranges the camera by hand (Manual), where it
+    /// waits like any other growth.
+    fn tidy_folds(&mut self) {
+        if self.camera == Camera::Manual {
+            self.layout_dirty = true;
+        } else {
+            self.relayout_now();
+        }
+    }
+
+    /// Fold finished subagents into their parent's card, or give them their
+    /// own cards again (`e`).
+    pub fn toggle_finished(&mut self) {
+        self.show_finished = !self.show_finished;
+        self.resync();
     }
 
     /// The view's state to keep across runs (see [`remember`]).
@@ -1019,11 +1065,19 @@ impl App {
     /// stale centering must not wait for the next batch.
     pub fn status_tick(&mut self) {
         let now = self.timeline.now_reference();
-        if self.session.recompute_liveness(now) {
+        let flipped = self.session.recompute_liveness(now);
+        if flipped {
             self.session.recompute_group_status();
-            // Status flips never change topology, so this is a content-only sync;
-            // layout stays user-driven (no auto-relayout — see `resync`).
-            graph::sync(&mut self.flow, &self.session, false);
+        }
+        // Agents also fold as they age, with no status flipping.
+        let refolded = self.refold();
+        if flipped || refolded {
+            // A status flip alone is a content-only sync; layout stays
+            // user-driven (no auto-relayout — see `resync`).
+            graph::sync_folding(&mut self.flow, &self.session, &self.folded, false);
+        }
+        if refolded {
+            self.tidy_folds();
         }
         if self.camera == Camera::Follow {
             self.track_activity();
